@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Poort shows which TCP ports are listening and which project each belongs to.
+"""Portly shows which TCP ports are listening and which project each belongs to.
 
-  poort               the live view in a terminal, else the printed list
-  poort list          your dev servers, grouped per project, printed once
-  poort -a            every listening port, desktop apps and helper processes too
-  poort shop          only what belongs to shop (project, branch, folder or tool)
-  poort 3000          one port in detail
-  poort kill 3000     stop what listens on it: the process, or its container
-  poort kill wt1      stop everything of a project or stack, after asking
-  poort restart 3000  stop it and start it again the way it was started
-  poort open 3000     open http://localhost:3000 in the browser
-  poort logs 3000     follow its output: docker logs, or the file it writes to
-  poort free 3000     the first free port from 3000 on
-  poort wait 3000     wait until something listens on 3000
-  poort --json        the same data as JSON, for scripts
-  poort live          interactive: pick a port, see it, open, follow, copy or stop it
-                      (what plain poort opens in a terminal)
+  portly               the live view in a terminal, else the printed list
+  portly list          your dev servers, grouped per project, printed once
+  portly -a            every listening port, desktop apps and helper processes too
+  portly shop          only what belongs to shop (project, branch, folder or tool)
+  portly 3000          one port in detail
+  portly kill 3000     stop what listens on it: the process, or its container
+  portly kill wt1      stop everything of a project or stack, after asking
+  portly restart 3000  stop it and start it again the way it was started
+  portly open 3000     open http://localhost:3000 in the browser
+  portly logs 3000     follow its output: docker logs, or the file it writes to
+  portly free 3000     the first free port from 3000 on
+  portly wait 3000     wait until something listens on 3000
+  portly --json        the same data as JSON, for scripts
+  portly live          interactive: pick a port, see it, open, follow, copy or stop it
+                       (what plain portly opens in a terminal)
 
 A process belongs to the git checkout it runs from, so a worktree is a project
 of its own next to the main checkout of its repo. A port that Docker forwards
@@ -383,7 +383,7 @@ def restart_argv(args: str, cwd: str) -> Optional[List[str]]:
 
 def default_log(item: Listener) -> str:
     name = item.place.repo if item.place else re.sub(r"\W+", "-", label(item))
-    return os.path.join(HOME, ".cache", "poort", f"{name}-{item.port}.log")
+    return os.path.join(HOME, ".cache", "portly", f"{name}-{item.port}.log")
 
 
 def plan_restart(item: Listener, procs: Dict[int, Tuple[int, str]],
@@ -847,12 +847,12 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
 def hints_for(item: Listener) -> List[str]:
     hints = []
     if url_of(item):
-        hints.append(f"poort open {item.port}")
+        hints.append(f"portly open {item.port}")
     if item.container or item.log:
-        hints.append(f"poort logs {item.port}")
+        hints.append(f"portly logs {item.port}")
     if item.container or item.restart:
-        hints.append(f"poort restart {item.port}")
-    hints.append(f"poort kill {item.port}")
+        hints.append(f"portly restart {item.port}")
+    hints.append(f"portly kill {item.port}")
     return hints
 
 
@@ -976,7 +976,7 @@ def start(plan: Restart) -> int:
     the plan's log. The new pid goes into wt's pid file when there is one."""
     os.makedirs(os.path.dirname(plan.log), exist_ok=True)
     with open(plan.log, "a") as log:
-        log.write(f"\n── poort restart {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
+        log.write(f"\n── portly restart {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
         log.flush()
         process = subprocess.Popen(plan.argv, cwd=plan.cwd, stdin=subprocess.DEVNULL, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True)
@@ -1125,7 +1125,7 @@ def restart(rows: List[Listener], ports: List[int], terms: List[str], sure: bool
         plan_lines.append(f"  {paint(BOLD, str(item.port).rjust(port_w))}  {label(item)}  {what}")
         if item.restart and item.restart.terminal:
             note = (f"ran in terminal {item.restart.terminal}; comes back in the background, "
-                    f"see poort logs {item.port}")
+                    f"see portly logs {item.port}")
             plan_lines.append(f"  {' ' * port_w}  {paint(DIM, note)}")
     print("\n" + "\n".join(plan_lines) + "\n", flush=True)
     doable = [item for item in targets if item.container or item.restart]
@@ -1255,7 +1255,7 @@ def split_targets(words: List[str]) -> Tuple[List[int], List[str]]:
 
 def visible(rows: List[Listener], terms: List[str], show_all: bool) -> List[Listener]:
     """The rows to list: dev servers, or everything with -a. A filter that finds
-    nothing among the dev servers also looks at apps, so `poort spotify` works."""
+    nothing among the dev servers also looks at apps, so `portly spotify` works."""
     dev = rows if show_all else [item for item in drop_helpers(rows) if is_dev(item)]
     if not terms:
         return dev
@@ -1269,14 +1269,14 @@ def show_list(rows: List[Listener], terms: List[str], show_all: bool, paint: Pai
         if terms:
             print(f"\n  Nothing found for {' '.join(terms)}.\n")
             return 1
-        print("\n  Nothing is listening." + ("" if show_all else " poort -a shows apps too.") + "\n")
+        print("\n  Nothing is listening." + ("" if show_all else " portly -a shows apps too.") + "\n")
         return 0
     width = terminal_width()
     groups = group_rows(rows)
     print("\n" + "\n".join(render_groups(groups, paint, width)) + "\n")
     if sys.stdout.isatty():
         summary = f"{plural(len(rows), 'port', 'ports')} in {plural(len(groups), 'project', 'projects')}"
-        print(f"  {paint(DIM, summary + '  ·  poort 3000 for details  ·  poort for the interactive view')}\n")
+        print(f"  {paint(DIM, summary + '  ·  portly 3000 for details  ·  portly for the interactive view')}\n")
     return 0
 
 
@@ -1448,7 +1448,7 @@ class KeyReader:
 
 
 class LiveView:
-    """poort live: the grouped list on top, the selected port below, keys at the bottom."""
+    """portly live: the grouped list on top, the selected port below, keys at the bottom."""
 
     KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("c", "copy"), ("r", "restart"), ("k", "stop"),
             ("R K", "whole project"), ("/", "search"), ("a", "all"), ("q", "quit")]
@@ -1707,11 +1707,11 @@ class LiveView:
         height, width = screen.getmaxyx()
         screen.erase()
         if height < 10 or width < 50:
-            self.put(0, 0, "poort live: make the window bigger", styles.normal[""])
+            self.put(0, 0, "portly live: make the window bigger", styles.normal[""])
             screen.refresh()
             return
         left, right = self.title_segments(width)
-        x = self.put(0, 0, " poort ", styles.bar)
+        x = self.put(0, 0, " portly ", styles.bar)
         for text, tone in left:
             x = self.put(0, x, text, styles.normal[tone])
         right_w = sum(len(text) for text, _ in right)
@@ -1784,22 +1784,22 @@ class LiveView:
 
 
 HELP = """\
-  poort                    interactive view of your dev servers per project
-  poort list               the same list, printed once
-  poort shop               only what belongs to shop (project, branch, folder, tool)
-  poort 3000               one port in detail
-  poort kill 3000 8000     stop what listens there
-  poort kill wt1           stop everything of a project or stack (asks first)
-  poort restart 3000       stop it and start it again the way it was started (also: restart wt1)
-  poort open 3000/admin    open http://localhost:3000/admin in your browser
-  poort logs 3000          follow its output: docker logs, or the file it writes to
-  poort free 3000          the first free port from 3000 on
-  poort wait 3000          wait until something listens on 3000 (handy in scripts)
+  portly                   interactive view of your dev servers per project
+  portly list              the same list, printed once
+  portly shop              only what belongs to shop (project, branch, folder, tool)
+  portly 3000              one port in detail
+  portly kill 3000 8000    stop what listens there
+  portly kill wt1          stop everything of a project or stack (asks first)
+  portly restart 3000      stop it and start it again the way it was started (also: restart wt1)
+  portly open 3000/admin   open http://localhost:3000/admin in your browser
+  portly logs 3000         follow its output: docker logs, or the file it writes to
+  portly free 3000         the first free port from 3000 on
+  portly wait 3000         wait until something listens on 3000 (handy in scripts)
 """
 
 
 def parser_for(command: str, description: str) -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(prog=f"poort {command}".strip(), description=description,
+    return argparse.ArgumentParser(prog=f"portly {command}".strip(), description=description,
                                    epilog=HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
 
 
@@ -1815,12 +1815,12 @@ def paint_for_stdout() -> Paint:
 
 
 def cmd_show(argv: List[str]) -> int:
-    parser = parser_for("", "Who listens on which port, per project. In a terminal poort opens "
-                            "the interactive view; poort list prints.")
+    parser = parser_for("", "Who listens on which port, per project. In a terminal portly opens "
+                            "the interactive view; portly list prints.")
     parser.add_argument("targets", nargs="*", metavar="port|filter",
                         help="a port number shows that port in detail; a word filters by project")
     parser.add_argument("-a", "--all", action="store_true", help="apps and helper processes too")
-    parser.add_argument("-k", "--kill", action="store_true", help="the same as poort kill")
+    parser.add_argument("-k", "--kill", action="store_true", help="the same as portly kill")
     parser.add_argument("--json", action="store_true", help="as JSON, for scripts")
     args = parser.parse_args(argv)
     ports, terms = targets_of(parser, args.targets)
@@ -1841,7 +1841,7 @@ def interactive() -> bool:
 
 
 def cmd_start(argv: List[str]) -> int:
-    """Plain poort: the live view in a terminal; a port, --json or a pipe prints."""
+    """Plain portly: the live view in a terminal; a port, --json or a pipe prints."""
     printing = {"-h", "--help", "--json", "-k", "--kill"}
     if not interactive() or printing & set(argv) or any(word.isdigit() for word in argv):
         return cmd_show(argv)
@@ -1956,7 +1956,7 @@ def cmd_live(argv: List[str]) -> int:
     parser.add_argument("-a", "--all", action="store_true", help="apps and helper processes too")
     args = parser.parse_args(argv)
     if not interactive():
-        print("poort live needs a terminal; poort list prints the list.", file=sys.stderr)
+        print("portly live needs a terminal; portly list prints the list.", file=sys.stderr)
         return 2
     os.environ.setdefault("ESCDELAY", "25")  # esc reacts at once instead of after a second
     locale.setlocale(locale.LC_ALL, "")  # curses counts ─ … ● as one cell only under a UTF-8 locale
@@ -1968,7 +1968,7 @@ def cmd_live(argv: List[str]) -> int:
 
 COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_restart, "open": cmd_open,
             "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
-            # The Dutch names poort had first, so scripts and habits keep working.
+            # The Dutch names from its days as poort, so scripts and habits keep working.
             "lijst": cmd_show, "herstart": cmd_restart, "vrij": cmd_free, "wacht": cmd_wait}
 
 
