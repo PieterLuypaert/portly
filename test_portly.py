@@ -1,4 +1,4 @@
-"""Tests for poort. Run with: python3 -m unittest"""
+"""Tests for portly. Run with: python3 -m unittest"""
 import argparse
 import contextlib
 import importlib.machinery
@@ -14,22 +14,22 @@ import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_loader = importlib.machinery.SourceFileLoader("poort", os.path.join(HERE, "poort"))
-poort = importlib.util.module_from_spec(importlib.util.spec_from_loader("poort", _loader))
-sys.modules["poort"] = poort
-_loader.exec_module(poort)
+_loader = importlib.machinery.SourceFileLoader("portly", os.path.join(HERE, "portly"))
+portly = importlib.util.module_from_spec(importlib.util.spec_from_loader("portly", _loader))
+sys.modules["portly"] = portly
+_loader.exec_module(portly)
 
 
 # A safety net: the code under test stops real processes, and a test that
 # slips (fixture ports such as 20110 can be live dev servers) must never reach
-# one it did not start. Every signal goes through poort.send, which here only
+# one it did not start. Every signal goes through portly.send, which here only
 # lets through descendants of this test run; docker changes are refused.
 VIOLATIONS = []
-_real_send = poort.send
+_real_send = portly.send
 
 
 def _started_by_this_run(pid):
-    procs = poort.read_processes()
+    procs = portly.read_processes()
     current = pid
     while current > 1 and current in procs:
         if current == os.getpid():
@@ -50,8 +50,8 @@ def _refused_docker(args, timeout):
     raise AssertionError(f"a test tried to run docker {args[0]}")
 
 
-poort.send = _guarded_send
-poort.docker = _refused_docker
+portly.send = _guarded_send
+portly.docker = _refused_docker
 
 
 def tearDownModule():
@@ -60,7 +60,7 @@ def tearDownModule():
 
 
 def listener(port=3000, pid=1, args="", cwd="", ppid=0, place=None, command="node"):
-    return poort.Listener(port, pid, command, ppid=ppid, args=args, cwd=cwd, place=place)
+    return portly.Listener(port, pid, command, ppid=ppid, args=args, cwd=cwd, place=place)
 
 
 class ParseLsofTest(unittest.TestCase):
@@ -70,13 +70,13 @@ class ParseLsofTest(unittest.TestCase):
             "p13826", "csymfony", "f17", "n127.0.0.1:8000",
             "p25043", "ccom.docke", "f121", "n*:20116",
         ])
-        found = {(item.port, item.pid, item.command, tuple(item.addresses)) for item in poort.parse_lsof(text)}
+        found = {(item.port, item.pid, item.command, tuple(item.addresses)) for item in portly.parse_lsof(text)}
         self.assertEqual(found, {(3000, 40997, "node", ("[::1]", "127.0.0.1")),
                                  (8000, 13826, "symfony", ("127.0.0.1",)),
                                  (20116, 25043, "com.docke", ("*",))})
 
     def test_skips_an_address_without_a_port(self):
-        self.assertEqual(poort.parse_lsof("p1\ncnode\nf3\nn*:*"), [])
+        self.assertEqual(portly.parse_lsof("p1\ncnode\nf3\nn*:*"), [])
 
 
 class LabelTest(unittest.TestCase):
@@ -87,31 +87,31 @@ class LabelTest(unittest.TestCase):
             "node /x/node_modules/@nestjs/cli/bin/nest.js start": "@nestjs/cli",
         }
         for args, name in cases.items():
-            self.assertEqual(poort.label(listener(args=args)), name, args)
+            self.assertEqual(portly.label(listener(args=args)), name, args)
 
     def test_names_a_script_after_the_script(self):
-        self.assertEqual(poort.label(listener(args="node server.js")), "node server.js")
-        self.assertEqual(poort.label(listener(args="node dist/main")), "node dist/main")
-        self.assertEqual(poort.label(listener(args="python3 -m http.server 9000")), "python3 http.server")
-        self.assertEqual(poort.label(listener(args="/usr/local/bin/node /srv/app/index.js")), "node index.js")
+        self.assertEqual(portly.label(listener(args="node server.js")), "node server.js")
+        self.assertEqual(portly.label(listener(args="node dist/main")), "node dist/main")
+        self.assertEqual(portly.label(listener(args="python3 -m http.server 9000")), "python3 http.server")
+        self.assertEqual(portly.label(listener(args="/usr/local/bin/node /srv/app/index.js")), "node index.js")
         macos_python = "/Library/Developer/CommandLineTools/Python.app/Contents/MacOS/Python -m http.server"
-        self.assertEqual(poort.label(listener(args=macos_python)), "python http.server")
+        self.assertEqual(portly.label(listener(args=macos_python)), "python http.server")
 
     def test_names_anything_else_after_its_executable(self):
-        self.assertEqual(poort.label(listener(args="symfony server:start -d")), "symfony")
-        self.assertEqual(poort.label(listener(args="next-server (v16.3.4)")), "next-server")
-        self.assertEqual(poort.label(listener(args="php-fpm: master process (/a b/fpm.ini)")), "php-fpm")
-        self.assertEqual(poort.label(listener(args="/Applications/Spotify.app/Contents/MacOS/Spotify")), "Spotify")
+        self.assertEqual(portly.label(listener(args="symfony server:start -d")), "symfony")
+        self.assertEqual(portly.label(listener(args="next-server (v16.3.4)")), "next-server")
+        self.assertEqual(portly.label(listener(args="php-fpm: master process (/a b/fpm.ini)")), "php-fpm")
+        self.assertEqual(portly.label(listener(args="/Applications/Spotify.app/Contents/MacOS/Spotify")), "Spotify")
 
     def test_falls_back_to_the_lsof_name(self):
-        self.assertEqual(poort.label(listener(args="", command="com.docke")), "com.docke")
+        self.assertEqual(portly.label(listener(args="", command="com.docke")), "com.docke")
 
 
 class DeepInfoTest(unittest.TestCase):
     def test_counts_connections_on_the_server_side(self):
         text = "\n".join(["p1", "f20", "n127.0.0.1:3000->127.0.0.1:52344", "f21", "n127.0.0.1:3000->127.0.0.1:52345",
                           "p2", "f9", "n127.0.0.1:52344->127.0.0.1:3000", "n[::1]:8000->[::1]:61000"])
-        self.assertEqual(poort.count_connections(text), {3000: 2, 52344: 1, 8000: 1})
+        self.assertEqual(portly.count_connections(text), {3000: 2, 52344: 1, 8000: 1})
 
     def test_finds_the_file_a_process_writes_to(self):
         text = "\n".join([
@@ -119,43 +119,43 @@ class DeepInfoTest(unittest.TestCase):
             "p2", "f1", "tCHR", "n/dev/null", "f7", "tREG", "n/x/server.log", "f8", "tREG", "n/x/app.log",
             "p3", "f1", "tCHR", "n/dev/ttys012",
         ])
-        self.assertEqual(poort.find_logs(text), ({1: "/logs/1-web.log"}, {1: "/logs/1-web.log", 2: "/x/server.log"}))
+        self.assertEqual(portly.find_logs(text), ({1: "/logs/1-web.log"}, {1: "/logs/1-web.log", 2: "/x/server.log"}))
 
     def test_shortens_a_parent_command(self):
-        self.assertEqual(poort.short_command("node /x/.local/state/fnm/bin/pnpm dev"), "pnpm dev")
-        self.assertEqual(poort.short_command("/bin/zsh -l"), "zsh -l")
-        self.assertEqual(poort.short_command("node --inspect app.js"), "node --inspect app.js")
+        self.assertEqual(portly.short_command("node /x/.local/state/fnm/bin/pnpm dev"), "pnpm dev")
+        self.assertEqual(portly.short_command("/bin/zsh -l"), "zsh -l")
+        self.assertEqual(portly.short_command("node --inspect app.js"), "node --inspect app.js")
 
 
 class DetailFieldsTest(unittest.TestCase):
     def test_gives_a_url_except_for_databases(self):
-        self.assertEqual(poort.url_of(listener(3000, args="node server.js")), "http://localhost:3000")
-        self.assertEqual(poort.url_of(listener(5432, args="postgres")), "")
-        self.assertEqual(poort.url_of(listener(8000, args="symfony server:start -d")), "https://localhost:8000")
-        self.assertEqual(poort.url_of(listener(20111, args="symfony server:start --no-tls")), "http://localhost:20111")
+        self.assertEqual(portly.url_of(listener(3000, args="node server.js")), "http://localhost:3000")
+        self.assertEqual(portly.url_of(listener(5432, args="postgres")), "")
+        self.assertEqual(portly.url_of(listener(8000, args="symfony server:start -d")), "https://localhost:8000")
+        self.assertEqual(portly.url_of(listener(20111, args="symfony server:start --no-tls")), "http://localhost:20111")
 
     def test_tells_whether_the_network_can_reach_it(self):
-        self.assertTrue(poort.is_local_only(poort.Listener(3000, 1, "node", addresses=["127.0.0.1", "[::1]"])))
-        self.assertFalse(poort.is_local_only(poort.Listener(3000, 1, "node", addresses=["*"])))
-        self.assertFalse(poort.is_local_only(poort.Listener(3000, 1, "node", addresses=["192.168.1.5"])))
+        self.assertTrue(portly.is_local_only(portly.Listener(3000, 1, "node", addresses=["127.0.0.1", "[::1]"])))
+        self.assertFalse(portly.is_local_only(portly.Listener(3000, 1, "node", addresses=["*"])))
+        self.assertFalse(portly.is_local_only(portly.Listener(3000, 1, "node", addresses=["192.168.1.5"])))
 
     def test_shows_the_port_inside_a_container(self):
-        item = poort.Listener(20116, 9, "com.docke", addresses=["*"], connections=2)
-        item.container = poort.parse_docker("\t".join([
+        item = portly.Listener(20116, 9, "com.docke", addresses=["*"], connections=2)
+        item.container = portly.parse_docker("\t".join([
             "shop-wt1-firestore-1", "firestore", "0.0.0.0:20116->8080/tcp", "Up 1 hour", "shop-wt1", "firestore", "/x",
         ]))[20116]
-        fields = {key: (value, note) for key, value, _, note in poort.detail_fields(item)}
+        fields = {key: (value, note) for key, value, _, note in portly.detail_fields(item)}
         self.assertEqual(fields["inside"], ("port 8080 in the container", ""))
         self.assertEqual(fields["reach"], ("your network too", "*"))
         self.assertEqual(fields["connections"], ("2 open", ""))
 
     def test_picks_how_to_show_logs(self):
         item = listener(3000, 1, args="node server.js")
-        self.assertIsNone(poort.logs_command(item, 100, True))
+        self.assertIsNone(portly.logs_command(item, 100, True))
         item.log = "/x/web.log"
-        self.assertEqual(poort.logs_command(item, 50, True), ["tail", "-n", "50", "-F", "/x/web.log"])
-        item.container = poort.Container("db-1", "mysql", "Up", "api", "database", "/x")
-        self.assertEqual(poort.logs_command(item, 20, False), ["docker", "logs", "--tail", "20", "db-1"])
+        self.assertEqual(portly.logs_command(item, 50, True), ["tail", "-n", "50", "-F", "/x/web.log"])
+        item.container = portly.Container("db-1", "mysql", "Up", "api", "database", "/x")
+        self.assertEqual(portly.logs_command(item, 20, False), ["docker", "logs", "--tail", "20", "db-1"])
 
 
 class FakeScanner:
@@ -179,7 +179,7 @@ class LiveViewTest(unittest.TestCase):
             listener(20111, 4, args="symfony server:start", cwd=HOME_DIR, place=tree),
         ]
         self.scanner = FakeScanner(self.rows)
-        self.view = poort.LiveView(None, self.scanner, [], False)
+        self.view = portly.LiveView(None, self.scanner, [], False)
         self.view.pull()
 
     def press(self, *keys):
@@ -235,14 +235,14 @@ class LiveViewTest(unittest.TestCase):
         self.press("r")
         self.assertIsNone(self.view.confirm)
         self.assertEqual(self.view.message, "3000 cannot restart: no restart plan")
-        self.rows[0].restart = poort.Restart(["pnpm", "dev"], "/x/shop/apps/web", [10, 1], "/x/web.log")
+        self.rows[0].restart = portly.Restart(["pnpm", "dev"], "/x/shop/apps/web", [10, 1], "/x/web.log")
         self.press("r")
         self.assertEqual(self.view.confirm[0], "Restart 3000 vite with pnpm dev?")
         self.press("y")
         self.assertEqual(done, [("restart", [3000])])
 
     def test_scrolls_to_show_the_header_of_the_selected_group(self):
-        lines = poort.group_lines(self.view.groups, 100)
+        lines = portly.group_lines(self.view.groups, 100)
         self.view.selected, self.view.scroll = 20110, 0
         self.view.keep_visible(lines, 3)
         shown = lines[self.view.scroll: self.view.scroll + 3]
@@ -271,13 +271,13 @@ class FakeScreen:
 
     def get_wch(self):
         if not self.queue:
-            raise poort.curses.error("no input")
+            raise portly.curses.error("no input")
         return self.queue.pop(0)
 
 
 class KeyReaderTest(unittest.TestCase):
     def keys(self, text):
-        reader, found = poort.KeyReader(FakeScreen(text)), []
+        reader, found = portly.KeyReader(FakeScreen(text)), []
         while True:
             key = reader.read()
             if key is None and not reader.screen.queue:
@@ -304,14 +304,14 @@ class KeyReaderTest(unittest.TestCase):
 class StartTest(unittest.TestCase):
     def start(self, argv, terminal):
         called = []
-        originals = poort.interactive, poort.cmd_live, poort.cmd_show
-        poort.interactive = lambda: terminal
-        poort.cmd_live = lambda args: called.append(("live", args)) or 0
-        poort.cmd_show = lambda args: called.append(("show", args)) or 0
-        self.addCleanup(lambda: setattr(poort, "interactive", originals[0]))
-        self.addCleanup(lambda: setattr(poort, "cmd_live", originals[1]))
-        self.addCleanup(lambda: setattr(poort, "cmd_show", originals[2]))
-        poort.main(argv)
+        originals = portly.interactive, portly.cmd_live, portly.cmd_show
+        portly.interactive = lambda: terminal
+        portly.cmd_live = lambda args: called.append(("live", args)) or 0
+        portly.cmd_show = lambda args: called.append(("show", args)) or 0
+        self.addCleanup(lambda: setattr(portly, "interactive", originals[0]))
+        self.addCleanup(lambda: setattr(portly, "cmd_live", originals[1]))
+        self.addCleanup(lambda: setattr(portly, "cmd_show", originals[2]))
+        portly.main(argv)
         return called[0][0]
 
     def test_opens_the_live_view_in_a_terminal(self):
@@ -322,20 +322,20 @@ class StartTest(unittest.TestCase):
         self.assertEqual(self.start(["3000"], terminal=True), "show")
         self.assertEqual(self.start(["--json"], terminal=True), "show")
         self.assertEqual(self.start([], terminal=False), "show")
-        self.assertEqual(poort.COMMANDS["list"].__name__, "cmd_show")
+        self.assertEqual(portly.COMMANDS["list"].__name__, "cmd_show")
 
     def test_keeps_the_dutch_command_names(self):
         for dutch, english in {"lijst": "list", "herstart": "restart", "vrij": "free", "wacht": "wait"}.items():
-            self.assertIs(poort.COMMANDS[dutch], poort.COMMANDS[english], dutch)
+            self.assertIs(portly.COMMANDS[dutch], portly.COMMANDS[english], dutch)
 
 
 class JsonTest(unittest.TestCase):
     def test_describes_a_worktree_process(self):
         item = listener(20110, 7, args="node server.js", cwd="/t/apps/web",
                         place=place(sub="apps/web", branch="fix/a", is_worktree=True, top="/t"))
-        item.stack = poort.Stack("shop", 1, "/t", {"web": 20110})
+        item.stack = portly.Stack("shop", 1, "/t", {"web": 20110})
         item.elapsed = "02:00"
-        data = json.loads(json.dumps(poort.as_json(item)))
+        data = json.loads(json.dumps(portly.as_json(item)))
         self.assertEqual(data["project"], {"repo": "shop", "branch": "fix/a", "worktree": True,
                                            "path": "/t", "folder": "apps/web"})
         self.assertEqual(data["stack"], {"name": "shop", "index": 1, "role": "web"})
@@ -347,44 +347,44 @@ class ShortAgeTest(unittest.TestCase):
     def test_turns_ps_etime_into_one_unit(self):
         cases = {"00:42": "<1m", "12:05": "12m", "03:10:00": "3h", "06-10:49:22": "6d", "  01:00:00": "1h"}
         for etime, age in cases.items():
-            self.assertEqual(poort.short_age(etime), age, etime)
+            self.assertEqual(portly.short_age(etime), age, etime)
 
     def test_says_when_something_started(self):
-        now = poort.datetime(2026, 10, 10, 14, 0)
-        self.assertEqual(poort.started_at(3600, now), "today 13:00")
-        self.assertEqual(poort.started_at(20 * 3600, now), "yesterday 18:00")
-        self.assertEqual(poort.started_at(3 * 86400, now), "Wed 7 Oct 14:00")
+        now = portly.datetime(2026, 10, 10, 14, 0)
+        self.assertEqual(portly.started_at(3600, now), "today 13:00")
+        self.assertEqual(portly.started_at(20 * 3600, now), "yesterday 18:00")
+        self.assertEqual(portly.started_at(3 * 86400, now), "Wed 7 Oct 14:00")
 
     def test_gives_nothing_for_garbage(self):
-        self.assertEqual(poort.short_age(""), "")
-        self.assertEqual(poort.short_age("soon"), "")
+        self.assertEqual(portly.short_age(""), "")
+        self.assertEqual(portly.short_age("soon"), "")
 
 
 class OnePerPortTest(unittest.TestCase):
     def test_keeps_the_parent_of_workers_on_one_port(self):
         rows = [listener(51443, 61035, ppid=13848), listener(51443, 13848, ppid=13826),
                 listener(51443, 65207, ppid=13848)]
-        self.assertEqual([item.pid for item in poort.one_per_port(rows)], [13848])
+        self.assertEqual([item.pid for item in portly.one_per_port(rows)], [13848])
 
     def test_sorts_by_port(self):
         rows = [listener(8000, 2), listener(3000, 1)]
-        self.assertEqual([item.port for item in poort.one_per_port(rows)], [3000, 8000])
+        self.assertEqual([item.port for item in portly.one_per_port(rows)], [3000, 8000])
 
     def test_drop_helpers_hides_a_child_of_another_listener(self):
         rows = [listener(8000, 13826, ppid=1), listener(51443, 13848, ppid=13826)]
-        self.assertEqual([item.port for item in poort.drop_helpers(rows)], [8000])
+        self.assertEqual([item.port for item in portly.drop_helpers(rows)], [8000])
 
 
 class FitTest(unittest.TestCase):
     def test_narrows_the_column_with_the_most_to_spare(self):
-        self.assertEqual(poort.fit([10, 40, 30], [6, 12, 10], 60), [10, 26, 24])
+        self.assertEqual(portly.fit([10, 40, 30], [6, 12, 10], 60), [10, 26, 24])
 
     def test_stops_at_the_minimum_widths(self):
-        self.assertEqual(poort.fit([10, 40, 30], [6, 12, 10], 5), [6, 12, 10])
+        self.assertEqual(portly.fit([10, 40, 30], [6, 12, 10], 5), [6, 12, 10])
 
 
 def place(repo="shop", sub="", branch="main", is_worktree=False, top="/x/shop"):
-    return poort.Place(repo, sub, branch, is_worktree, top, top + "/.git")
+    return portly.Place(repo, sub, branch, is_worktree, top, top + "/.git")
 
 
 class GroupTest(unittest.TestCase):
@@ -396,7 +396,7 @@ class GroupTest(unittest.TestCase):
             listener(8000, 2, cwd=HOME_DIR, place=place(sub="apps/api")),
             listener(3417, 5, cwd="/nowhere/at/all"),
         ]
-        groups = poort.group_rows(rows)
+        groups = portly.group_rows(rows)
         self.assertEqual([(g.title, g.branch, [r.port for r in g.rows]) for g in groups], [
             ("blog", "main", [3001]),
             ("shop", "main", [3000, 8000]),
@@ -406,8 +406,8 @@ class GroupTest(unittest.TestCase):
 
     def test_puts_a_container_without_checkout_under_its_docker_project(self):
         item = listener(5432, 9)
-        item.container = poort.Container("db-1", "postgres", "Up 1 hour", "db", "postgres", "")
-        self.assertEqual([g.title for g in poort.group_rows([item])], ["docker db"])
+        item.container = portly.Container("db-1", "postgres", "Up 1 hour", "db", "postgres", "")
+        self.assertEqual([g.title for g in portly.group_rows([item])], ["docker db"])
 
     def test_renders_a_header_per_project(self):
         rows = [
@@ -416,7 +416,7 @@ class GroupTest(unittest.TestCase):
                      place=place(sub="apps/web", branch="fix/thing", is_worktree=True, top="/t")),
             listener(3417, 3, args="node server.js", cwd="/nowhere/at/all"),
         ]
-        lines = poort.render_groups(poort.group_rows(rows), poort.Paint(False), 120)
+        lines = portly.render_groups(portly.group_rows(rows), portly.Paint(False), 120)
         self.assertEqual([line.split() for line in lines], [
             ["shop", "main", "/x/shop"],
             ["3000", "vite", "apps/web", "pid", "1"],
@@ -435,12 +435,12 @@ class FilterTest(unittest.TestCase):
                        place=place(sub="apps/web"))
         tree = listener(20110, 2, args="symfony server:start", cwd=HOME_DIR + "/t",
                         place=place(branch="fix/cart", is_worktree=True, top="/t"))
-        tree.stack = poort.Stack("shop", 1, "/t", {"api": 20110})
+        tree.stack = portly.Stack("shop", 1, "/t", {"api": 20110})
         app = listener(7768, 3, args="/Applications/Spotify.app/Contents/MacOS/Spotify", cwd="/")
         return [web, tree, app]
 
     def ports(self, terms, show_all=False):
-        return [item.port for item in poort.visible(self.rows(), terms, show_all)]
+        return [item.port for item in portly.visible(self.rows(), terms, show_all)]
 
     def test_matches_project_branch_tool_or_stack(self):
         self.assertEqual(self.ports(["shop"]), [3000, 20110])
@@ -456,9 +456,9 @@ class FilterTest(unittest.TestCase):
         self.assertEqual(self.ports(["spotify"]), [7768])
 
     def test_splits_ports_from_words(self):
-        self.assertEqual(poort.split_targets(["3000", "shop", "8000"]), ([3000, 8000], ["shop"]))
+        self.assertEqual(portly.split_targets(["3000", "shop", "8000"]), ([3000, 8000], ["shop"]))
         with self.assertRaises(argparse.ArgumentTypeError):
-            poort.split_targets(["0"])
+            portly.split_targets(["0"])
 
 
 class DockerTest(unittest.TestCase):
@@ -469,26 +469,26 @@ class DockerTest(unittest.TestCase):
             "\t".join(["dns", "coredns", "0.0.0.0:53->53/udp, 0.0.0.0:9000-9001->9000-9001/tcp, 8080/tcp",
                        "Up 3 minutes", "", "", ""]),
         ])
-        by_port = poort.parse_docker(text)
+        by_port = portly.parse_docker(text)
         self.assertEqual(sorted(by_port), [3306, 9000, 9001])
         self.assertEqual(by_port[3306].service, "database")
         self.assertEqual(by_port[9001].name, "dns")
 
     def test_skips_lines_it_cannot_read(self):
-        self.assertEqual(poort.parse_docker("Cannot connect to the Docker daemon"), {})
+        self.assertEqual(portly.parse_docker("Cannot connect to the Docker daemon"), {})
 
     def test_turns_the_status_into_an_age(self):
         cases = {"Up 6 days (healthy)": "6d", "Up About an hour": "1h", "Up 25 hours": "1d",
                  "Up 45 minutes": "45m", "Up Less than a second": "<1m", "Up 2 weeks": "14d",
                  "Exited (0) 2 days ago": ""}
         for status, age in cases.items():
-            self.assertEqual(poort.docker_age(status), age, status)
+            self.assertEqual(portly.docker_age(status), age, status)
 
     def test_shows_a_container_by_service_project_and_image(self):
         item = listener(3306, 25043, args="/Applications/Docker.app/Contents/MacOS/com.docker.backend")
-        item.container = poort.Container("api-database-1", "mysql:8.4", "Up 6 days", "api", "database", "/x")
-        self.assertTrue(poort.is_dev(item))
-        lines = poort.render_groups(poort.group_rows([item]), poort.Paint(False), 120)
+        item.container = portly.Container("api-database-1", "mysql:8.4", "Up 6 days", "api", "database", "/x")
+        self.assertTrue(portly.is_dev(item))
+        lines = portly.render_groups(portly.group_rows([item]), portly.Paint(False), 120)
         self.assertEqual(lines[1].split(), ["3306", "database", "docker", "api", "mysql:8.4", "6d"])
 
 
@@ -497,21 +497,21 @@ class DetailTest(unittest.TestCase):
         item = listener(3000, 40997, ppid=40983, args="node server.js", cwd=HOME_DIR + "/shop",
                         place=place(repo="shop", branch="fix/cart", is_worktree=True))
         item.elapsed = "01:00:00"
-        lines = [" ".join(line.split()) for line in poort.render_detail(item, poort.Paint(False))]
+        lines = [" ".join(line.split()) for line in portly.render_detail(item, portly.Paint(False))]
         for expected in ["3000 node server.js http://localhost:3000", "pid 40997", "folder ~/shop gone",
-                         "project shop · wt fix/cart", "poort open 3000 · poort kill 3000"]:
+                         "project shop · wt fix/cart", "portly open 3000 · portly kill 3000"]:
             self.assertIn(expected, lines)
         self.assertTrue(any(line.startswith("running 1h since") for line in lines))
 
     def test_says_a_free_port_is_free(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = poort.show_ports([3999], [], paint=poort.Paint(False))
+            code = portly.show_ports([3999], [], paint=portly.Paint(False))
         self.assertEqual((code, out.getvalue().strip()), (0, "3999 is free."))
 
     def test_rejects_a_number_that_is_no_port(self):
         with self.assertRaises(argparse.ArgumentTypeError):
-            poort.port_number("70000")
+            portly.port_number("70000")
 
 
 class StopTest(unittest.TestCase):
@@ -531,25 +531,25 @@ class StopTest(unittest.TestCase):
 
     def test_stops_a_server_politely(self):
         proc, port = self.serve(ignore_term=False)
-        self.assertIsNone(poort.stop(listener(port, proc.pid)))
-        self.assertEqual(poort.listening_pids(port), [])
+        self.assertIsNone(portly.stop(listener(port, proc.pid)))
+        self.assertEqual(portly.listening_pids(port), [])
 
     def test_kills_a_server_that_ignores_sigterm(self):
         proc, port = self.serve(ignore_term=True)
-        self.assertIsNone(poort.stop(listener(port, proc.pid)))
+        self.assertIsNone(portly.stop(listener(port, proc.pid)))
         self.assertEqual(proc.wait(timeout=5), -9)
 
     def test_stops_several_servers_at_once(self):
         servers = [self.serve(ignore_term=False) for _ in range(3)]
         rows = [listener(port, proc.pid) for proc, port in servers]
-        self.assertEqual(poort.stop_many(rows), {port: None for _, port in servers})
+        self.assertEqual(portly.stop_many(rows), {port: None for _, port in servers})
 
     def test_names_a_port_it_may_not_free(self):
         proc, port = self.serve(ignore_term=False)
-        original = poort.send
-        poort.send = lambda pid, sig: f"no permission to stop pid {pid}"
-        self.addCleanup(setattr, poort, "send", original)
-        self.assertEqual(poort.stop_many([listener(port, proc.pid)]),
+        original = portly.send
+        portly.send = lambda pid, sig: f"no permission to stop pid {pid}"
+        self.addCleanup(setattr, portly, "send", original)
+        self.assertEqual(portly.stop_many([listener(port, proc.pid)]),
                          {port: f"no permission to stop pid {proc.pid}"})
 
 
@@ -577,29 +577,29 @@ PROCS = {
 
 class RestartPlanTest(unittest.TestCase):
     def test_finds_the_command_that_started_a_server(self):
-        self.assertEqual(poort.launcher_of(40997, PROCS), 40983)
-        self.assertEqual(poort.launcher_of(97970, PROCS), 97886)
-        self.assertEqual(poort.launcher_of(41418, PROCS), 41377)
-        self.assertEqual(poort.launcher_of(13826, PROCS), 13826)
+        self.assertEqual(portly.launcher_of(40997, PROCS), 40983)
+        self.assertEqual(portly.launcher_of(97970, PROCS), 97886)
+        self.assertEqual(portly.launcher_of(41418, PROCS), 41377)
+        self.assertEqual(portly.launcher_of(13826, PROCS), 13826)
 
     def test_collects_everything_under_a_launcher(self):
-        self.assertEqual(sorted(poort.descendants(97886, PROCS)), [97904, 97910, 97956, 97970])
+        self.assertEqual(sorted(portly.descendants(97886, PROCS)), [97904, 97910, 97956, 97970])
 
     def test_reruns_a_package_manager_through_path(self):
-        original = poort.shutil.which
-        poort.shutil.which = lambda name: f"/bin/{name}" if name in ("pnpm", "symfony", "node") else None
-        self.addCleanup(setattr, poort.shutil, "which", original)
-        self.assertEqual(poort.restart_argv("node /gone/fnm/bin/pnpm exec vite --port 1", "/"),
+        original = portly.shutil.which
+        portly.shutil.which = lambda name: f"/bin/{name}" if name in ("pnpm", "symfony", "node") else None
+        self.addCleanup(setattr, portly.shutil, "which", original)
+        self.assertEqual(portly.restart_argv("node /gone/fnm/bin/pnpm exec vite --port 1", "/"),
                          ["pnpm", "exec", "vite", "--port", "1"])
-        self.assertEqual(poort.restart_argv("symfony server:start -d", "/"), ["symfony", "server:start", "-d"])
-        self.assertIsNone(poort.restart_argv("next-server (v16.3.4)", "/"))
-        self.assertEqual(poort.restart_argv("node ./x.js", "/"), ["node", "./x.js"])
+        self.assertEqual(portly.restart_argv("symfony server:start -d", "/"), ["symfony", "server:start", "-d"])
+        self.assertIsNone(portly.restart_argv("next-server (v16.3.4)", "/"))
+        self.assertEqual(portly.restart_argv("node ./x.js", "/"), ["node", "./x.js"])
 
     def test_refuses_an_orphan_and_an_app(self):
         orphan = listener(3417, 5, args="node server.js", cwd="/nowhere/at/all")
-        self.assertEqual(poort.plan_restart(orphan, {}, {}), (None, "its folder no longer exists"))
+        self.assertEqual(portly.plan_restart(orphan, {}, {}), (None, "its folder no longer exists"))
         app = listener(7768, 6, args="/Applications/Spotify.app/Contents/MacOS/Spotify", cwd="/")
-        self.assertIsNone(poort.plan_restart(app, {}, {})[0])
+        self.assertIsNone(portly.plan_restart(app, {}, {})[0])
 
     def test_hands_a_wt_server_its_pid_file(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -607,12 +607,12 @@ class RestartPlanTest(unittest.TestCase):
             os.makedirs(registry)
             open(os.path.join(registry, "1-web.pid"), "w").write("41367\n")
             item = listener(20110, 41418, args=PROCS[41418][1], cwd=folder)
-            item.stack = poort.Stack("shop", 1, folder, {"web": 20110}, registry)
+            item.stack = portly.Stack("shop", 1, folder, {"web": 20110}, registry)
             item.stdout = os.path.join(registry, "logs", "1-web.log")
-            original = poort.shutil.which
-            poort.shutil.which = lambda name: f"/bin/{name}"
-            self.addCleanup(setattr, poort.shutil, "which", original)
-            plan, problem = poort.plan_restart(item, PROCS, {41377: folder})
+            original = portly.shutil.which
+            portly.shutil.which = lambda name: f"/bin/{name}"
+            self.addCleanup(setattr, portly.shutil, "which", original)
+            plan, problem = portly.plan_restart(item, PROCS, {41377: folder})
         self.assertEqual(problem, "")
         self.assertEqual(plan.argv, ["pnpm", "exec", "vite", "--port", "20110", "--strictPort"])
         self.assertEqual((plan.pids, plan.pidfile, plan.log),
@@ -639,15 +639,15 @@ class RestartTest(unittest.TestCase):
         first = subprocess.Popen([sys.executable, "server.py", str(port)], cwd=folder, stdout=log)
         self.addCleanup(first.wait)
         self.addCleanup(first.kill)  # cleanups run last first: kill, then wait
-        self.assertTrue(poort.wait_for_listen([port], 5)[0])
-        item = next(row for row in poort.one_per_port(poort.read_listeners(deep=True)) if row.port == port)
+        self.assertTrue(portly.wait_for_listen([port], 5)[0])
+        item = next(row for row in portly.one_per_port(portly.read_listeners(deep=True)) if row.port == port)
         self.assertIsNotNone(item.restart, item.restart_problem)
-        self.assertEqual(poort.restart_many([item], timeout=10), {port: None})
-        new = poort.listening_pids(port)
-        self.addCleanup(lambda: [poort.send(pid, poort.signal.SIGKILL) for pid in poort.listening_pids(port)])
+        self.assertEqual(portly.restart_many([item], timeout=10), {port: None})
+        new = portly.listening_pids(port)
+        self.addCleanup(lambda: [portly.send(pid, portly.signal.SIGKILL) for pid in portly.listening_pids(port)])
         self.assertTrue(new and first.pid not in new)
         with open(os.path.join(folder, "out.log")) as output:
-            self.assertIn("── poort restart", output.read())
+            self.assertIn("── portly restart", output.read())
 
 
 class FreeAndWaitTest(unittest.TestCase):
@@ -656,7 +656,7 @@ class FreeAndWaitTest(unittest.TestCase):
             sock.bind(("127.0.0.1", 0))
             sock.listen()
             busy = sock.getsockname()[1]
-            found = poort.free_ports(busy, 2, taken={busy + 1})
+            found = portly.free_ports(busy, 2, taken={busy + 1})
         self.assertNotIn(busy, found)
         self.assertNotIn(busy + 1, found)
         self.assertEqual(len(found), 2)
@@ -671,7 +671,7 @@ class FreeAndWaitTest(unittest.TestCase):
         timer.start()
         self.addCleanup(timer.cancel)
         ticks = []
-        ok, waited = poort.wait_for_listen([port], 5, tick=lambda waited, waiting: ticks.append(waiting))
+        ok, waited = portly.wait_for_listen([port], 5, tick=lambda waited, waiting: ticks.append(waiting))
         self.assertTrue(ok)
         self.assertGreaterEqual(waited, 0.4)
         self.assertEqual(ticks[0], [port])
@@ -680,7 +680,7 @@ class FreeAndWaitTest(unittest.TestCase):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        self.assertFalse(poort.wait_for_listen([port], 0.3)[0])
+        self.assertFalse(portly.wait_for_listen([port], 0.3)[0])
 
 
 class KillTest(unittest.TestCase):
@@ -694,17 +694,17 @@ class KillTest(unittest.TestCase):
         ]
 
     def test_picks_ports_and_every_dev_server_a_word_matches(self):
-        targets, free = poort.pick_targets(self.rows(), [3000, 3999], ["fix/cart"])
+        targets, free = portly.pick_targets(self.rows(), [3000, 3999], ["fix/cart"])
         self.assertEqual(([item.port for item in targets], free), ([3000, 20110, 20111], [3999]))
 
     def kill(self, ports, terms, sure=False, answer=True):
         asked, stopped = [], []
-        original = poort.stop_many
-        poort.stop_many = lambda rows: stopped.extend(item.port for item in rows) or {
+        original = portly.stop_many
+        portly.stop_many = lambda rows: stopped.extend(item.port for item in rows) or {
             item.port: None for item in rows}
-        self.addCleanup(setattr, poort, "stop_many", original)
+        self.addCleanup(setattr, portly, "stop_many", original)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            code = poort.kill(self.rows(), ports, terms, sure, poort.Paint(False),
+            code = portly.kill(self.rows(), ports, terms, sure, portly.Paint(False),
                               ask=lambda question: asked.append(question) or answer)
         return code, asked, stopped
 
@@ -747,12 +747,12 @@ class PlaceTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_places_the_main_checkout(self):
-        found = poort.place_of(os.path.join(self.repo, "apps", "web"))
+        found = portly.place_of(os.path.join(self.repo, "apps", "web"))
         repo = os.path.realpath(self.repo)
-        self.assertEqual(found, poort.Place("shop", "apps/web", "main", False, repo, repo + "/.git"))
+        self.assertEqual(found, portly.Place("shop", "apps/web", "main", False, repo, repo + "/.git"))
 
     def test_places_a_worktree_under_its_repo(self):
-        found = poort.place_of(self.tree)
+        found = portly.place_of(self.tree)
         self.assertEqual((found.repo, found.sub, found.branch, found.is_worktree, found.top),
                          ("shop", "", "fix/cart", True, os.path.realpath(self.tree)))
 
@@ -765,30 +765,30 @@ class PlaceTest(unittest.TestCase):
 
     def test_reads_the_wt_registry(self):
         self.write_registry()
-        stacks = poort.read_stacks(os.path.realpath(os.path.join(self.repo, ".git")))
+        stacks = portly.read_stacks(os.path.realpath(os.path.join(self.repo, ".git")))
         registry = os.path.realpath(os.path.join(self.repo, ".git", "shop-worktrees"))
-        self.assertEqual(stacks, [poort.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111}, registry)])
+        self.assertEqual(stacks, [portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111}, registry)])
 
     def test_ties_a_worktree_and_its_wt_containers_to_the_stack(self):
         self.write_registry()
-        lookup = poort.Lookup()
+        lookup = portly.Lookup()
         self.assertEqual(lookup.stack_at(lookup.place(self.tree)).index, 1)
         tools = os.path.join(self.repo, "tools")
         os.makedirs(tools)
-        container = poort.Container("shop-wt1-gcs-1", "gcs", "Up 1 hour", "shop-wt1", "gcs", tools)
+        container = portly.Container("shop-wt1-gcs-1", "gcs", "Up 1 hour", "shop-wt1", "gcs", tools)
         home, stack = lookup.container_home(container)
         self.assertEqual((home.branch, home.is_worktree, stack.index), ("fix/cart", True, 1))
 
     def test_ties_another_container_to_its_compose_folder(self):
         os.makedirs(os.path.join(self.repo, "apps", "api"))
-        container = poort.Container("api-db-1", "mysql", "Up 1 hour", "api", "db",
+        container = portly.Container("api-db-1", "mysql", "Up 1 hour", "api", "db",
                                     os.path.join(self.repo, "apps", "api"))
-        home, stack = poort.Lookup().container_home(container)
+        home, stack = portly.Lookup().container_home(container)
         self.assertEqual((home.repo, home.sub, home.branch, stack), ("shop", "apps/api", "main", None))
 
     def test_has_no_place_outside_git(self):
-        self.assertIsNone(poort.place_of(self.tmp.name))
-        self.assertIsNone(poort.place_of("/"))
+        self.assertIsNone(portly.place_of(self.tmp.name))
+        self.assertIsNone(portly.place_of("/"))
 
 
 if __name__ == "__main__":
