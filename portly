@@ -894,8 +894,13 @@ def wait_for_ports(ports: List[int], seconds: float) -> set:
 
 
 def docker(args: List[str], timeout: float) -> subprocess.CompletedProcess:
-    """Run a docker command that changes containers; one place, so tests can fence it off."""
-    return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    """Run a docker command that changes containers; one place, so tests can fence it off.
+    A docker that does not answer in time fails with that as its reason."""
+    cmd = ["docker", *args]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 1, "", f"docker did not answer within {int(timeout)}s")
 
 
 def send(pid: int, sig: int) -> Optional[str]:

@@ -26,6 +26,7 @@ _loader.exec_module(portly)
 # lets through descendants of this test run; docker changes are refused.
 VIOLATIONS = []
 _real_send = portly.send
+_real_docker = portly.docker
 
 
 def _started_by_this_run(pid):
@@ -573,6 +574,18 @@ class StopTest(unittest.TestCase):
         self.addCleanup(setattr, portly, "send", original)
         self.assertEqual(portly.stop_many([listener(port, proc.pid)]),
                          {port: f"no permission to stop pid {proc.pid}"})
+
+    def test_names_a_docker_that_does_not_answer(self):
+        hang(self, "docker")
+        self.addCleanup(setattr, portly, "docker", portly.docker)
+        portly.docker = _real_docker  # safe: every docker run times out before it starts
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            item = listener(port, os.getpid())
+            item.container = portly.Container("portly-test-no-such-container", "mysql", "Up", "", "", "")
+            self.assertEqual(portly.stop_many([item]), {port: "docker did not answer within 120s"})
 
 
 PROCS = {
