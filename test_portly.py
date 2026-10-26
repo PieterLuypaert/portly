@@ -595,6 +595,9 @@ class StopTest(unittest.TestCase):
                          {port: f"no permission to stop pid {proc.pid}"})
 
     def test_leaves_docker_itself_alone(self):
+        signalled = []
+        self.addCleanup(setattr, portly, "send", portly.send)
+        portly.send = lambda pid, sig: signalled.append((pid, sig)) or "test refused to signal"
         # What a container's port looks like when docker ps did not answer.
         with socket.socket() as server:
             server.bind(("127.0.0.1", 0))
@@ -602,6 +605,7 @@ class StopTest(unittest.TestCase):
             port = server.getsockname()[1]
             item = listener(port, 5975, args=DOCKER_BACKEND, cwd=HOME_DIR, command="com.docker.backend")
             self.assertEqual(portly.stop_many([item]), {port: portly.LEAVE_DOCKER})
+        self.assertEqual(signalled, [])
 
     def test_names_a_docker_that_does_not_answer(self):
         hang(self, "docker")
