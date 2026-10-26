@@ -852,6 +852,16 @@ class PlaceTest(unittest.TestCase):
         registry = os.path.realpath(os.path.join(self.repo, ".git", "shop-worktrees"))
         self.assertEqual(stacks, [portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111}, registry)])
 
+    def test_reads_the_wt_registry_with_every_port_on_one_line(self):
+        registry = os.path.join(self.repo, ".git", "shop-worktrees")
+        os.makedirs(registry)
+        with open(os.path.join(registry, "1.env"), "w") as entry:
+            entry.write(f"REG_BRANCH=fix/cart\nREG_PATH={self.tree}\nREG_PORTS=web=20110 api=20111\n"
+                        "REG_DB=shop_wt1\nREG_PR=42\nREG_HERE=1\n")
+        stacks = portly.read_stacks(os.path.realpath(os.path.join(self.repo, ".git")))
+        self.assertEqual(stacks, [portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111},
+                                               os.path.realpath(registry))])
+
     def test_ties_a_worktree_and_its_wt_containers_to_the_stack(self):
         self.write_registry()
         lookup = portly.Lookup()
