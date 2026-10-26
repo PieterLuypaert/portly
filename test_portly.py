@@ -589,6 +589,15 @@ class StopTest(unittest.TestCase):
         self.assertEqual(portly.stop_many([listener(port, proc.pid)]),
                          {port: f"no permission to stop pid {proc.pid}"})
 
+    def test_leaves_docker_itself_alone(self):
+        # What a container's port looks like when docker ps did not answer.
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            item = listener(port, 5975, args=DOCKER_BACKEND, cwd=HOME_DIR, command="com.docker.backend")
+            self.assertEqual(portly.stop_many([item]), {port: portly.LEAVE_DOCKER})
+
     def test_names_a_docker_that_does_not_answer(self):
         hang(self, "docker")
         self.addCleanup(setattr, portly, "docker", portly.docker)
@@ -600,6 +609,9 @@ class StopTest(unittest.TestCase):
             item = listener(port, os.getpid())
             item.container = portly.Container("portly-test-no-such-container", "mysql", "Up", "", "", "")
             self.assertEqual(portly.stop_many([item]), {port: "docker did not answer within 120s"})
+
+
+DOCKER_BACKEND = "/Applications/Docker.app/Contents/MacOS/com.docker.backend services"
 
 
 PROCS = {
@@ -649,6 +661,13 @@ class RestartPlanTest(unittest.TestCase):
         self.assertEqual(portly.plan_restart(orphan, {}, {}), (None, "its folder no longer exists"))
         app = listener(7768, 6, args="/Applications/Spotify.app/Contents/MacOS/Spotify", cwd="/")
         self.assertIsNone(portly.plan_restart(app, {}, {})[0])
+
+    def test_refuses_docker_itself(self):
+        docker = listener(3306, 5975, args=DOCKER_BACKEND, cwd=HOME_DIR, command="com.docker.backend")
+        self.assertEqual(portly.plan_restart(docker, {}, {}), (None, portly.LEAVE_DOCKER))
+        self.assertNotIn("portly kill 3306", portly.hints_for(docker))
+        self.assertTrue(portly.is_docker_itself(listener(3306, 5975, command="com.docke")))
+        self.assertFalse(portly.is_docker_itself(listener(3000, 1, args="node /x/docker-tools/server.js")))
 
     def test_hands_a_wt_server_its_pid_file(self):
         with tempfile.TemporaryDirectory() as folder:

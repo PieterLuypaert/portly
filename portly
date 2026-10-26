@@ -392,6 +392,8 @@ def plan_restart(item: Listener, procs: Dict[int, Tuple[int, str]],
     """How to restart a process, or why that cannot be done."""
     if is_orphan(item):
         return None, "its folder no longer exists"
+    if is_docker_itself(item):
+        return None, LEAVE_DOCKER
     if not is_dev(item):
         return None, "not a dev server: restart apps yourself"
     launcher = launcher_of(item.pid, procs)
@@ -484,6 +486,20 @@ def drop_helpers(rows: List[Listener]) -> List[Listener]:
     symfony server: its port is internal."""
     pids = {item.pid for item in rows}
     return [item for item in rows if item.ppid not in pids]
+
+
+# Docker's own processes publish container ports on the host (Docker Desktop's
+# com.docker.backend, docker-proxy on Linux). When docker does not say which
+# container a port is, such a port looks like a plain process.
+DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*")
+LEAVE_DOCKER = "that is Docker itself, not one container: portly leaves it running"
+
+
+def is_docker_itself(item: Listener) -> bool:
+    """Docker's own process: stopping it stops every container with it."""
+    words = item.args.split()
+    exe = os.path.basename(words[0]) if words else ""
+    return not item.container and any(DOCKER_ITSELF.fullmatch(name) for name in (exe, item.command))
 
 
 def is_dev(item: Listener) -> bool:
@@ -853,7 +869,8 @@ def hints_for(item: Listener) -> List[str]:
         hints.append(f"portly logs {item.port}")
     if item.container or item.restart:
         hints.append(f"portly restart {item.port}")
-    hints.append(f"portly kill {item.port}")
+    if not is_docker_itself(item):
+        hints.append(f"portly kill {item.port}")
     return hints
 
 
@@ -927,7 +944,8 @@ def stop_many(rows: List[Listener]) -> Dict[int, Optional[str]]:
         if done.returncode != 0:
             reason = (done.stderr.strip().splitlines() or ["docker stop failed"])[-1]
             problems.update((item.port, reason) for item in containers)
-    processes = [item for item in rows if not item.container]
+    processes = [item for item in rows if not item.container and not is_docker_itself(item)]
+    problems.update((item.port, LEAVE_DOCKER) for item in rows if is_docker_itself(item))
     for item in processes:
         problem = send(item.pid, signal.SIGTERM)
         if problem:
@@ -1691,7 +1709,7 @@ class LiveView:
         item = self.current()
         possible = {"o": bool(item and url_of(item)), "c": bool(item and url_of(item)),
                     "r": bool(item and (item.container or item.restart)),
-                    "l": bool(item and (item.container or item.log)), "k": bool(item), "K": bool(item)}
+                    "l": bool(item and (item.container or item.log)), "k": bool(item and not is_docker_itself(item)), "K": bool(item)}
         segments: List[Segment] = [(" ", "")]
         for key, what in self.KEYS:
             on = possible.get(key, True)
