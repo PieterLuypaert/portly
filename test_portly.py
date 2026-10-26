@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -26,6 +27,7 @@ _loader.exec_module(portly)
 # lets through descendants of this test run; docker changes are refused.
 VIOLATIONS = []
 _real_send = portly.send
+_real_docker = portly.docker
 
 
 def _started_by_this_run(pid):
@@ -57,6 +59,19 @@ portly.docker = _refused_docker
 def tearDownModule():
     if VIOLATIONS:
         raise AssertionError("tests reached processes they did not start: " + "; ".join(VIOLATIONS))
+
+
+def hang(test, program):
+    """Make every run of program time out, as docker does while its daemon starts."""
+    real = subprocess.run
+
+    def fake(cmd, *args, **kwargs):
+        if cmd[0] == program:
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+        return real(cmd, *args, **kwargs)
+
+    subprocess.run = fake
+    test.addCleanup(setattr, subprocess, "run", real)
 
 
 def listener(port=3000, pid=1, args="", cwd="", ppid=0, place=None, command="node"):
@@ -240,6 +255,19 @@ class LiveViewTest(unittest.TestCase):
         self.assertEqual(self.view.confirm[0], "Restart 3000 vite with pnpm dev?")
         self.press("y")
         self.assertEqual(done, [("restart", [3000])])
+
+    def test_a_failed_stop_ends_the_spinner_and_says_why(self):
+        def broken(rows):
+            raise OSError("lsof went away")
+
+        self.addCleanup(setattr, portly, "stop_many", portly.stop_many)
+        portly.stop_many = broken
+        self.view.run_in_background("stop", [self.rows[0]])
+        deadline = time.monotonic() + 2
+        while self.view.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual((self.view.busy, self.view.message), ("", "stop failed: lsof went away"))
+        self.assertEqual(self.scanner.refreshed, 1)
 
     def test_scrolls_to_show_the_header_of_the_selected_group(self):
         lines = portly.group_lines(self.view.groups, 100)
@@ -477,6 +505,20 @@ class DockerTest(unittest.TestCase):
     def test_skips_lines_it_cannot_read(self):
         self.assertEqual(portly.parse_docker("Cannot connect to the Docker daemon"), {})
 
+    def test_a_hanging_lsof_is_not_taken_for_free_ports(self):
+        hang(self, "lsof")
+        with self.assertRaises(subprocess.TimeoutExpired):
+            portly.listening_ports()
+
+    def test_lists_processes_when_docker_hangs(self):
+        hang(self, "docker")
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            ports = {item.port for item in portly.read_listeners()}
+        self.assertIn(port, ports)
+
     def test_turns_the_status_into_an_age(self):
         cases = {"Up 6 days (healthy)": "6d", "Up About an hour": "1h", "Up 25 hours": "1d",
                  "Up 45 minutes": "45m", "Up Less than a second": "<1m", "Up 2 weeks": "14d",
@@ -552,6 +594,34 @@ class StopTest(unittest.TestCase):
         self.assertEqual(portly.stop_many([listener(port, proc.pid)]),
                          {port: f"no permission to stop pid {proc.pid}"})
 
+    def test_leaves_docker_itself_alone(self):
+        signalled = []
+        self.addCleanup(setattr, portly, "send", portly.send)
+        portly.send = lambda pid, sig: signalled.append((pid, sig)) or "test refused to signal"
+        # What a container's port looks like when docker ps did not answer.
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            item = listener(port, 5975, args=DOCKER_BACKEND, cwd=HOME_DIR, command="com.docker.backend")
+            self.assertEqual(portly.stop_many([item]), {port: portly.LEAVE_DOCKER})
+        self.assertEqual(signalled, [])
+
+    def test_names_a_docker_that_does_not_answer(self):
+        hang(self, "docker")
+        self.addCleanup(setattr, portly, "docker", portly.docker)
+        portly.docker = _real_docker  # safe: every docker run times out before it starts
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            item = listener(port, os.getpid())
+            item.container = portly.Container("portly-test-no-such-container", "mysql", "Up", "", "", "")
+            self.assertEqual(portly.stop_many([item]), {port: "docker did not answer within 120s"})
+
+
+DOCKER_BACKEND = "/Applications/Docker.app/Contents/MacOS/com.docker.backend services"
+
 
 PROCS = {
     # shop main: zsh -c, pnpm dev, vite
@@ -600,6 +670,13 @@ class RestartPlanTest(unittest.TestCase):
         self.assertEqual(portly.plan_restart(orphan, {}, {}), (None, "its folder no longer exists"))
         app = listener(7768, 6, args="/Applications/Spotify.app/Contents/MacOS/Spotify", cwd="/")
         self.assertIsNone(portly.plan_restart(app, {}, {})[0])
+
+    def test_refuses_docker_itself(self):
+        docker = listener(3306, 5975, args=DOCKER_BACKEND, cwd=HOME_DIR, command="com.docker.backend")
+        self.assertEqual(portly.plan_restart(docker, {}, {}), (None, portly.LEAVE_DOCKER))
+        self.assertNotIn("portly kill 3306", portly.hints_for(docker))
+        self.assertTrue(portly.is_docker_itself(listener(3306, 5975, command="com.docke")))
+        self.assertFalse(portly.is_docker_itself(listener(3000, 1, args="node /x/docker-tools/server.js")))
 
     def test_hands_a_wt_server_its_pid_file(self):
         with tempfile.TemporaryDirectory() as folder:
