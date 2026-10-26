@@ -180,6 +180,10 @@ def place_of(cwd: str) -> Optional[Place]:
     )
 
 
+# The fields of a wt registry entry that hold no port, as wt itself reads them.
+REGISTRY_FIELDS = {"branch", "path", "ports", "db", "pr", "here"}
+
+
 def read_stacks(common: str) -> List[Stack]:
     """wt's registry next to a git dir: one <common>/<name>-worktrees/<n>.env
     per worktree, with REG_PATH and its ports: REG_PORTS=web=20110 api=20111,
@@ -187,7 +191,7 @@ def read_stacks(common: str) -> List[Stack]:
     stacks = []
     for entry in sorted(glob.glob(os.path.join(common, "*-worktrees", "*.env"))):
         index = os.path.basename(entry)[: -len(".env")]
-        if not index.isdigit():
+        if not index.isdecimal():
             continue
         values = {}
         with open(entry) as lines:
@@ -197,9 +201,10 @@ def read_stacks(common: str) -> List[Stack]:
                     values[key[4:].lower()] = value.strip('"')
         if values.get("ports"):
             pairs = (pair.partition("=") for pair in values["ports"].split())
-            ports = {role: int(port) for role, _, port in pairs if port.isdigit()}
+            ports = {role: int(port) for role, _, port in pairs if port.isdecimal()}
         else:
-            ports = {role: int(value) for role, value in values.items() if value.isdigit() and role != "pr"}
+            ports = {role: int(value) for role, value in values.items()
+                     if value.isdecimal() and role not in REGISTRY_FIELDS}
         name = os.path.basename(os.path.dirname(entry))[: -len("-worktrees")]
         stacks.append(Stack(name, int(index), values.get("path", ""), ports, os.path.dirname(entry)))
     return stacks
