@@ -122,11 +122,10 @@ class Listener:
 
 def run(cmd: List[str]) -> str:
     """Stdout of cmd. lsof exits 1 on any missing pid and git outside a repo,
-    so the exit code is no sign of failure here; a missing tool gives "", and
-    so does one that hangs, such as docker while its daemon starts."""
+    so the exit code is no sign of failure here; a missing tool gives ""."""
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
         return ""
 
 
@@ -454,8 +453,12 @@ def read_listeners(deep: bool = False) -> List[Listener]:
         return listeners
     lookup = Lookup()
     add_process_info(listeners, lookup)
-    # Without Docker, or with its daemon down, this is empty.
-    containers = parse_docker(run(["docker", "ps", "--format", DOCKER_FORMAT]))
+    # Without Docker, with its daemon down, or while it does not answer, this is
+    # empty. Only docker's hang means that: a hanging lsof is no empty list.
+    try:
+        containers = parse_docker(run(["docker", "ps", "--format", DOCKER_FORMAT]))
+    except subprocess.TimeoutExpired:
+        containers = {}
     for item in listeners:
         item.container = containers.get(item.port)
         if item.container:

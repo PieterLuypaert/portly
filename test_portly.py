@@ -505,6 +505,11 @@ class DockerTest(unittest.TestCase):
     def test_skips_lines_it_cannot_read(self):
         self.assertEqual(portly.parse_docker("Cannot connect to the Docker daemon"), {})
 
+    def test_a_hanging_lsof_is_not_taken_for_free_ports(self):
+        hang(self, "lsof")
+        with self.assertRaises(subprocess.TimeoutExpired):
+            portly.listening_ports()
+
     def test_lists_processes_when_docker_hangs(self):
         hang(self, "docker")
         with socket.socket() as server:
