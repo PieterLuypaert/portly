@@ -182,7 +182,8 @@ def place_of(cwd: str) -> Optional[Place]:
 
 def read_stacks(common: str) -> List[Stack]:
     """wt's registry next to a git dir: one <common>/<name>-worktrees/<n>.env
-    per worktree, with REG_PATH and a REG_<ROLE> line per port."""
+    per worktree, with REG_PATH and its ports: REG_PORTS=web=20110 api=20111,
+    or a REG_<ROLE> line per port from older wt engines."""
     stacks = []
     for entry in sorted(glob.glob(os.path.join(common, "*-worktrees", "*.env"))):
         index = os.path.basename(entry)[: -len(".env")]
@@ -194,7 +195,11 @@ def read_stacks(common: str) -> List[Stack]:
                 key, sep, value = line.strip().partition("=")
                 if sep and key.startswith("REG_"):
                     values[key[4:].lower()] = value.strip('"')
-        ports = {role: int(value) for role, value in values.items() if value.isdigit() and role != "pr"}
+        if values.get("ports"):
+            pairs = (pair.partition("=") for pair in values["ports"].split())
+            ports = {role: int(port) for role, _, port in pairs if port.isdigit()}
+        else:
+            ports = {role: int(value) for role, value in values.items() if value.isdigit() and role != "pr"}
         name = os.path.basename(os.path.dirname(entry))[: -len("-worktrees")]
         stacks.append(Stack(name, int(index), values.get("path", ""), ports, os.path.dirname(entry)))
     return stacks
