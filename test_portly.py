@@ -655,6 +655,12 @@ class RestartPlanTest(unittest.TestCase):
     def test_collects_everything_under_a_launcher(self):
         self.assertEqual(sorted(portly.descendants(97886, PROCS)), [97904, 97910, 97956, 97970])
 
+    def test_reads_every_process_also_one_with_an_argument_that_is_no_utf8(self):
+        odd = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", b"caf\xe9"])
+        self.addCleanup(odd.wait)
+        self.addCleanup(odd.kill)
+        self.assertIn(odd.pid, portly.read_processes())
+
     def test_reruns_a_package_manager_through_path(self):
         original = portly.shutil.which
         portly.shutil.which = lambda name: f"/bin/{name}" if name in ("pnpm", "symfony", "node") else None
