@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: chill
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+  path_instructions:
+    - path: "portly"
+      instructions: >-
+        A single stdlib-only Python 3.9 script: no third-party imports and no
+        syntax newer than 3.9. macOS is the main platform, Linux should not break.
+    - path: "test_portly.py"
+      instructions: >-
+        unittest, run with `python3 -m unittest`. A test may only signal or stop
+        processes the test run started itself, never a real dev server or container.
+chat:
+  auto_reply: true
