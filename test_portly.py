@@ -59,6 +59,19 @@ def tearDownModule():
         raise AssertionError("tests reached processes they did not start: " + "; ".join(VIOLATIONS))
 
 
+def hang(test, program):
+    """Make every run of program time out, as docker does while its daemon starts."""
+    real = subprocess.run
+
+    def fake(cmd, *args, **kwargs):
+        if cmd[0] == program:
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+        return real(cmd, *args, **kwargs)
+
+    subprocess.run = fake
+    test.addCleanup(setattr, subprocess, "run", real)
+
+
 def listener(port=3000, pid=1, args="", cwd="", ppid=0, place=None, command="node"):
     return portly.Listener(port, pid, command, ppid=ppid, args=args, cwd=cwd, place=place)
 
@@ -476,6 +489,15 @@ class DockerTest(unittest.TestCase):
 
     def test_skips_lines_it_cannot_read(self):
         self.assertEqual(portly.parse_docker("Cannot connect to the Docker daemon"), {})
+
+    def test_lists_processes_when_docker_hangs(self):
+        hang(self, "docker")
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            ports = {item.port for item in portly.read_listeners()}
+        self.assertIn(port, ports)
 
     def test_turns_the_status_into_an_age(self):
         cases = {"Up 6 days (healthy)": "6d", "Up About an hour": "1h", "Up 25 hours": "1d",
