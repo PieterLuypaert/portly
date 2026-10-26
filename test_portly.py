@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -254,6 +255,19 @@ class LiveViewTest(unittest.TestCase):
         self.assertEqual(self.view.confirm[0], "Restart 3000 vite with pnpm dev?")
         self.press("y")
         self.assertEqual(done, [("restart", [3000])])
+
+    def test_a_failed_stop_ends_the_spinner_and_says_why(self):
+        def broken(rows):
+            raise OSError("lsof went away")
+
+        self.addCleanup(setattr, portly, "stop_many", portly.stop_many)
+        portly.stop_many = broken
+        self.view.run_in_background("stop", [self.rows[0]])
+        deadline = time.monotonic() + 2
+        while self.view.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual((self.view.busy, self.view.message), ("", "stop failed: lsof went away"))
+        self.assertEqual(self.scanner.refreshed, 1)
 
     def test_scrolls_to_show_the_header_of_the_selected_group(self):
         lines = portly.group_lines(self.view.groups, 100)

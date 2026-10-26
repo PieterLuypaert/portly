@@ -1570,15 +1570,20 @@ class LiveView:
         self.busy = f"stopping {names}" if action == "stop" else f"restarting {names}, waiting until it listens again"
 
         def work() -> None:
-            results = stop_many(targets) if action == "stop" else restart_many(targets)
-            problems = [f"{port}: {problem}" for port, problem in results.items() if problem]
-            if problems:
-                self.say(("still taken, " if action == "stop" else "") + "; ".join(problems), GONE)
+            try:
+                results = stop_many(targets) if action == "stop" else restart_many(targets)
+            except Exception as error:  # the view stays up and says what went wrong
+                self.say(f"{action} failed: {error}", GONE)
             else:
-                done = "free" if action == "stop" else "back up"
-                self.say(f"{names} {'is' if len(targets) == 1 else 'are'} {done}", FREE)
-            self.busy = ""
-            self.scanner.refresh()
+                problems = [f"{port}: {problem}" for port, problem in results.items() if problem]
+                if problems:
+                    self.say(("still taken, " if action == "stop" else "") + "; ".join(problems), GONE)
+                else:
+                    done = "free" if action == "stop" else "back up"
+                    self.say(f"{names} {'is' if len(targets) == 1 else 'are'} {done}", FREE)
+            finally:
+                self.busy = ""
+                self.scanner.refresh()
 
         threading.Thread(target=work, daemon=True).start()
 
