@@ -914,6 +914,62 @@ class CommandTest(unittest.TestCase):
         free = unused_port()
         self.assertIn(f"{free} is not listening: there is nothing to restart.", self.call("restart", str(free))[1])
 
+    def test_open_hands_the_url_to_the_browser(self):
+        _, port = self.serve()
+        opened, real = [], subprocess.run
+
+        def run(cmd, *args, **kwargs):
+            if cmd[0] == "browser":
+                return opened.append(cmd)
+            return real(cmd, *args, **kwargs)
+
+        self.addCleanup(setattr, subprocess, "run", real)
+        subprocess.run = run
+        self.addCleanup(setattr, portly, "opener", portly.opener)
+        portly.opener = lambda: "browser"
+        code, out, _ = self.call("open", f"{port}/health")
+        self.assertEqual(code, 0)
+        self.assertEqual(opened, [["browser", f"http://localhost:{port}/health"]])
+        self.assertIn(f"opened: http://localhost:{port}/health", out)
+        free = unused_port()
+        self.assertEqual(self.call("open", str(free))[:2], (1, f"\n  {free} is not listening.\n\n"))
+        self.assertEqual(self.call("open", "home")[0], 2)
+        self.assertEqual(len(opened), 1)
+
+    def test_logs_follows_the_file_a_server_writes_to(self):
+        _, port = self.serve(log=True)
+        self.assertEqual(self.call("logs", str(port), "-n", "5")[0], 0)
+        self.assertEqual(self.ran, [["tail", "-n", "5", "-F", os.path.realpath(os.path.join(self.folder, "out.log"))]])
+
+    def test_logs_of_a_server_without_a_file_or_of_a_free_port_fail(self):
+        _, port = self.serve()
+        code, out, _ = self.call("logs", str(port))
+        self.assertEqual(code, 1)
+        self.assertIn("does not write to a file", out)
+        self.assertEqual(self.call("logs", str(unused_port()))[0], 1)
+        self.assertEqual(self.ran, [])
+
+    def test_free_skips_a_taken_port(self):
+        _, port = self.serve()
+        code, out, _ = self.call("free", str(port), "-n", "2")
+        self.assertEqual(code, 0)
+        found = [int(word) for word in out.split()]
+        self.assertEqual(len(found), 2)
+        self.assertNotIn(port, found)
+        self.assertTrue(all(number > port for number in found))
+
+    def test_wait_returns_once_a_port_listens_and_gives_up_on_a_free_one(self):
+        _, port = self.serve()
+        self.assertEqual(self.call("wait", str(port), "-t", "2")[0], 0)
+        code, out, _ = self.call("wait", str(unused_port()), "-t", "0.3")
+        self.assertEqual(code, 1)
+        self.assertIn("not listening after", out)
+
+    def test_live_needs_a_terminal(self):
+        code, _, err = self.call("live")
+        self.assertEqual(code, 2)
+        self.assertIn("needs a terminal", err)
+
 
 HOME_DIR = os.path.expanduser("~")
 
