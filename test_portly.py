@@ -809,6 +809,81 @@ class KillTest(unittest.TestCase):
         self.assertEqual(self.kill([], ["nope"]), (1, [], []))
 
 
+def unused_port():
+    """A free port with room above it, which portly free needs to find more."""
+    while True:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        if port < 65000:
+            return port
+
+
+class CommandTest(unittest.TestCase):
+    """Every command the way it is typed, through main() in this process, so the
+    signal fence holds. The server runs in a folder of its own, whose name is a
+    filter word that finds that server and nothing else."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="portly-cli-")
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.folder])
+        self.word = os.path.basename(self.folder)
+        with open(os.path.join(self.folder, "server.py"), "w") as script:
+            script.write(SERVER)
+        self.addCleanup(setattr, sys, "stdin", sys.stdin)
+        sys.stdin = io.StringIO()  # no terminal: a question gets no answer instead of waiting
+        self.ran = []
+        self.addCleanup(setattr, portly.os, "execvp", portly.os.execvp)
+        portly.os.execvp = lambda file, args: self.ran.append(args)  # logs would replace the test run
+
+    def serve(self, log=False):
+        """A throwaway server; its output goes to out.log, or nowhere."""
+        port = unused_port()
+        output = open(os.path.join(self.folder, "out.log"), "w") if log else subprocess.DEVNULL
+        if log:
+            self.addCleanup(output.close)
+        proc = subprocess.Popen([sys.executable, "server.py", str(port)], cwd=self.folder,
+                                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertTrue(portly.wait_for_listen([port], 5)[0])
+        return proc, port
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = portly.main(list(argv))
+            except SystemExit as stop:
+                code = stop.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_list_finds_the_server_by_its_folder(self):
+        _, port = self.serve()
+        code, out, _ = self.call("list", self.word)
+        self.assertEqual(code, 0)
+        self.assertIn(str(port), out)
+
+    def test_a_port_shows_its_details_and_a_free_port_says_so(self):
+        proc, port = self.serve()
+        free = unused_port()
+        code, out, _ = self.call(str(port), str(free))
+        self.assertEqual(code, 0)
+        self.assertIn(str(proc.pid), out)
+        self.assertIn(f"{free} is free.", out)
+
+    def test_json_of_a_port_keeps_its_fields(self):
+        proc, port = self.serve()
+        code, out, _ = self.call("--json", str(port))
+        self.assertEqual(code, 0)
+        [data] = json.loads(out)
+        self.assertEqual((data["port"], data["pid"], data["cwd"]), (port, proc.pid, os.path.realpath(self.folder)))
+        self.assertEqual(sorted(data), sorted([
+            "port", "name", "url", "addresses", "local_only", "project", "stack", "container", "pid",
+            "command", "cwd", "folder_gone", "running_seconds", "memory_kb",
+            "log", "parent", "connections", "restart", "restart_problem"]))
+
+
 HOME_DIR = os.path.expanduser("~")
 
 
