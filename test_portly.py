@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pty
+import random
 import select
 import socket
 import struct
@@ -1156,6 +1157,121 @@ class PlaceTest(unittest.TestCase):
     def test_has_no_place_outside_git(self):
         self.assertIsNone(portly.place_of(self.tmp.name))
         self.assertIsNone(portly.place_of("/"))
+
+
+class FuzzTest(unittest.TestCase):
+    """Random input in the shapes the tools really produce, with random content
+    where they pass on whatever a process, file or container is called. A
+    parser may skip what it cannot read, but never raise. The seed is fixed, so
+    a failure repeats, and its message holds the input."""
+
+    ROUNDS = 1000
+    CHARS = [c for c in map(chr, range(0x20, 0x3000)) if c != "\t" and len(f"a{c}a".splitlines()) == 1]
+    ADDRESS = ["*", "127.0.0.1", "[::1]", "[fe80::1%lo0]", "0.0.0.0", ":", "."]
+    KEY_NAMES = {"up", "down", "left", "right", "home", "end", "pgup", "pgdn", "delete", "enter", "backspace", "esc"}
+
+    def setUp(self):
+        self.random = random.Random(1027)
+
+    def text(self, size=24):
+        """Any characters a single line can hold."""
+        return "".join(self.random.choice(self.CHARS) for _ in range(self.random.randrange(size)))
+
+    def mix(self, pieces, size=8):
+        """Pieces, a random port among them, joined at random."""
+        pieces = list(pieces) + [str(self.random.randrange(1, 65536))]
+        return "".join(self.random.choice(pieces) for _ in range(self.random.randrange(size)))
+
+    def published(self):
+        """A docker ps ports column: published ports, ranges among them, and ports only exposed."""
+        found = []
+        for _ in range(self.random.randrange(4)):
+            more = self.random.choice([0, 0, 3])
+            ports = [f"{port}-{port + more}" if more else str(port)
+                     for port in (self.random.randrange(1, 65000), self.random.randrange(1, 65000))]
+            where = self.random.choice(["0.0.0.0:", "[::]:", "127.0.0.1:", ""])
+            mapping = f"{where}{ports[0]}->{ports[1]}" if where else ports[1]
+            found.append(mapping + "/" + self.random.choice(["tcp", "udp"]))
+        return ", ".join(found)
+
+    def survives(self, function, *args, given=None):
+        try:
+            return function(*args)
+        except Exception as error:
+            on = "" if given is None else f" on {given!r}"
+            self.fail(f"{function.__name__}{args!r} raised {error!r}{on}")
+
+    def test_lsof_listeners_with_any_command_name(self):
+        for _ in range(self.ROUNDS):
+            lines = []
+            for _ in range(self.random.randrange(5)):
+                lines += ["p" + str(self.random.randrange(1, 99999)), "c" + self.text()]
+                lines += ["n" + self.mix(self.ADDRESS) for _ in range(self.random.randrange(3))]
+            for item in self.survives(portly.parse_lsof, "\n".join(lines)):
+                self.assertIsInstance(item.port, int)
+
+    def test_open_files_with_any_name(self):
+        for _ in range(self.ROUNDS):
+            lines = []
+            for _ in range(self.random.randrange(5)):
+                lines.append("p" + str(self.random.randrange(1, 99999)))
+                for _ in range(self.random.randrange(4)):
+                    lines += ["f" + self.random.choice(["1", "2", "3", "cwd", "txt"]),
+                              "t" + self.random.choice(["REG", "CHR", "DIR", "unix"]),
+                              "n" + self.text() + self.random.choice(["", ".log"])]
+            self.survives(portly.find_logs, "\n".join(lines))
+
+    def test_established_connections(self):
+        for _ in range(self.ROUNDS):
+            lines = ["n" + self.mix(self.ADDRESS) + "->" + self.mix(self.ADDRESS) for _ in range(4)]
+            self.survives(portly.count_connections, "\n".join(lines))
+
+    def test_docker_ps_with_any_names_and_labels(self):
+        for _ in range(self.ROUNDS):
+            lines = ["\t".join([self.text(), self.text(), self.published()] + [self.text() for _ in range(4)])
+                     for _ in range(3)]
+            lines.append("\t".join(self.text() for _ in range(8)))  # a label that holds a tab
+            for port in self.survives(portly.parse_docker, "\n".join(lines)):
+                self.assertTrue(0 < port < 65536, port)
+
+    def test_wt_registry_with_any_values(self):
+        common = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", common])
+        os.makedirs(os.path.join(common, "shop-worktrees"))
+        keys = ["PORTS", "PATH", "WEB", "API", "PR", "BRANCH", "HERE"]
+        values = ["web=", "api=", " ", '"', "²", "١", "/x/shop"]
+        for _ in range(self.ROUNDS):
+            lines = ["REG_" + self.random.choice(keys) + "=" + self.random.choice([self.mix(values), self.text()])
+                     for _ in range(5)]
+            with open(os.path.join(common, "shop-worktrees", "1.env"), "w", encoding="utf-8") as entry:
+                entry.write("\n".join(lines))
+            for stack in self.survives(portly.read_stacks, common, given="\n".join(lines)):
+                self.assertTrue(all(isinstance(port, int) for port in stack.ports.values()), stack.ports)
+
+    def test_any_command_line(self):
+        pieces = ["node", "pnpm", "python3", "/usr/bin/", "./", "-", "--port", " ", "server.js"]
+        folder = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, folder)
+        for _ in range(self.ROUNDS):
+            args = self.random.choice([self.mix(pieces), self.text(), self.mix(pieces) + " " + self.text()])
+            self.survives(portly.short_command, args)
+            self.survives(portly.runner_name, args)
+            self.survives(portly.label, listener(args=args))
+            self.survives(portly.restart_argv, args, folder)
+
+    def test_any_terminal_input(self):
+        pieces = ["\x1b", "[", "O", "<", ";", "M", "m", "~", "A", "1", "5", "64", "\r", "\x7f", "\x00", "\x03",
+                  "\x1b[A", "\x1bOB", "\x1b[5~", "\x1b[1;2B", "\x1b[<64;3;3M", "\x1b[<0;12;8M", "\x1b[<0;12;8m",
+                  "\x1b[M`!(", "\x1b[M !("]
+        for _ in range(self.ROUNDS):
+            typed = self.random.choice([self.mix(pieces, 16), self.text(), self.mix(pieces) + self.text()])
+            reader, keys = portly.KeyReader(FakeScreen(typed)), []
+            while reader.screen.queue:
+                keys.append(self.survives(reader.read, given=typed))
+            for key in keys:
+                known = (key is None or key in self.KEY_NAMES or (isinstance(key, str) and len(key) == 1)
+                         or (isinstance(key, tuple) and key[0] in ("click", "wheel")))
+                self.assertTrue(known, f"{typed!r} read as {key!r}")
 
 
 if __name__ == "__main__":
