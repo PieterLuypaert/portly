@@ -1,15 +1,20 @@
 """Tests for portly. Run with: python3 -m unittest"""
 import argparse
 import contextlib
+import fcntl
 import importlib.machinery
 import importlib.util
 import io
 import json
 import os
+import pty
+import select
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 import unittest
@@ -327,6 +332,92 @@ class KeyReaderTest(unittest.TestCase):
     def test_reads_plain_keys_enter_backspace_and_a_lone_esc(self):
         self.assertEqual(self.keys("k\r\x7f"), ["k", "enter", "backspace"])
         self.assertEqual(self.keys("\x1b"), ["esc"])
+
+
+LIVE = """import fcntl, sys, termios
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)  # the pseudo-terminal becomes this session's, so resizes arrive
+import test_portly
+code = test_portly.portly.main(["live"] + sys.argv[1:])
+sys.exit(3 if test_portly.VIOLATIONS else code)
+"""
+
+
+class LiveTerminalTest(unittest.TestCase):
+    """The live view in a real pseudo-terminal, as curses runs it. The view runs
+    in a child that imports this file, so the signal fence holds there too, and
+    it only gets keys that stop, restart, open or copy nothing."""
+
+    def setUp(self):
+        folder = tempfile.mkdtemp(prefix="portly-live-")
+        self.addCleanup(subprocess.run, ["rm", "-rf", folder])
+        code = ("import socket, time\n"
+                "s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
+                "print(s.getsockname()[1], flush=True); time.sleep(60)\n")
+        server = subprocess.Popen([sys.executable, "-c", code], cwd=folder, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(server.stdout.close)
+        self.addCleanup(server.wait)
+        self.addCleanup(server.kill)
+        self.port = str(int(server.stdout.readline()))
+        self.terminal, child_end = pty.openpty()
+        self.addCleanup(os.close, self.terminal)
+        self.resize(30, 100)
+        # curses takes LINES and COLUMNS over the terminal's own size
+        env = {key: value for key, value in os.environ.items() if key not in ("LINES", "COLUMNS")}
+        self.view = subprocess.Popen([sys.executable, "-c", LIVE, os.path.basename(folder)], cwd=HERE,
+                                     env=dict(env, TERM="screen-256color"),
+                                     stdin=child_end, stdout=child_end, stderr=child_end, start_new_session=True)
+        os.close(child_end)
+        self.addCleanup(self.view.wait)
+        self.addCleanup(self.view.kill)
+        self.output, self.mark = b"", 0
+
+    def resize(self, rows, columns):
+        self.mark = len(getattr(self, "output", b""))
+        fcntl.ioctl(self.terminal, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+
+    def read(self, wait):
+        """Take what the view wrote within wait seconds; False once it closed the terminal."""
+        if not select.select([self.terminal], [], [], wait)[0]:
+            return True
+        try:
+            chunk = os.read(self.terminal, 65536)
+        except OSError:  # Linux: the child closed its end
+            chunk = b""
+        self.output += chunk
+        return bool(chunk)
+
+    def expect(self, text):
+        """Wait until the view draws text, after the last key or resize."""
+        deadline = time.monotonic() + 10
+        while text.encode() not in self.output[self.mark:]:
+            self.assertLess(time.monotonic(), deadline, f"{text!r} never drawn; got {self.output[-1500:]!r}")
+            self.assertTrue(self.read(0.2), f"the view closed: {self.output[-1500:]!r}")
+
+    def pause(self, seconds):
+        """Keep reading for a while: a view that cannot write falls behind on keys."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and self.read(max(0, deadline - time.monotonic())):
+            pass
+
+    def press(self, *keys):
+        self.mark = len(self.output)
+        for key in keys:
+            os.write(self.terminal, key.encode())
+            self.pause(0.2)  # a lone esc only counts as esc when nothing follows it at once
+
+    def quit(self):
+        self.press("q")
+        deadline = time.monotonic() + 10
+        while self.view.poll() is None and time.monotonic() < deadline:
+            self.pause(0.2)
+        self.assertEqual(self.view.poll(), 0, self.output[-1500:])
+        self.assertNotIn(b"Traceback", self.output)
+
+    def test_draws_the_server_takes_keys_and_quits(self):
+        self.expect(self.port)
+        self.press("\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[H", "\x1b[<64;3;3M", "\x1b[<0;3;3M", "a")
+        self.press("/", "x", "\x7f", "\x1b")
+        self.quit()
 
 
 class StartTest(unittest.TestCase):
