@@ -1,0 +1,43 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    name: ${{ matrix.os }} · Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The python3 macOS ships, which the README says is enough.
+          - os: macos-latest
+            python: system
+          - os: macos-latest
+            python: "3.x"
+          # setup-python has no 3.9 build for Ubuntu 26.04 and later.
+          - os: ubuntu-24.04
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.x"
+    steps:
+      - uses: actions/checkout@v7
+      - if: matrix.python != 'system'
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - if: runner.os == 'Linux'
+        run: command -v lsof || { sudo apt-get update -q && sudo apt-get install -y -q lsof; }
+      - name: python3 -m unittest
+        env:
+          PYTHON: ${{ matrix.python == 'system' && '/usr/bin/python3' || 'python3' }}
+        run: |
+          "$PYTHON" --version
+          "$PYTHON" -m unittest -v
