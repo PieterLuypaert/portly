@@ -1,0 +1,7 @@
+# portly has no .py extension, so it is named here. The rule set stays narrow:
+# real bugs and syntax newer than Python 3.9, no style churn.
+target-version = "py39"
+extend-include = ["portly"]
+
+[lint]
+select = ["F", "E9", "B", "FA102"]

@@ -3,6 +3,11 @@ language: en-US
 reviews:
   profile: chill
   poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  suggested_labels: false
+  suggested_reviewers: false
   auto_review:
     enabled: true
     drafts: false
@@ -11,14 +16,85 @@ reviews:
   pre_merge_checks:
     docstrings:
       mode: "off"
+    title:
+      mode: warning
+      requirements: >-
+        A conventional-commit title: a lowercase type (feat, fix, chore,
+        refactor, docs or test), a colon, and a short summary of what changed.
+    custom_checks:
+      - name: Stdlib and Python 3.9
+        mode: warning
+        instructions: >-
+          Pass when `portly` and `test_portly.py` import only modules from the
+          Python standard library and use no syntax or standard-library API
+          added after Python 3.9, such as match statements, `X | Y` unions
+          evaluated at runtime, `zip(strict=...)`, `itertools.pairwise`,
+          `tomllib` or `except*`. Fail otherwise.
+      - name: Behaviour change has a test
+        mode: warning
+        instructions: >-
+          Pass when the PR does not change what `portly` does, or when it also
+          adds or changes a test in `test_portly.py` that exercises the changed
+          behaviour. Comments, docstrings, formatting and renames that keep the
+          behaviour are no behaviour change. Fail when `portly` behaves
+          differently and no test in `test_portly.py` covers the difference.
+      - name: Tests stay fenced
+        mode: warning
+        instructions: >-
+          Pass when `test_portly.py` is unchanged, or when no added or changed
+          test can signal or stop a process the test run did not start itself.
+          Signals must go through `portly.send`, which the tests fence to
+          descendants of the test run, and docker changes through
+          `portly.docker`, which the tests refuse; replacing either with a stub
+          that records instead of acting also passes, and so does stopping a
+          process the test started through its own `subprocess.Popen` handle
+          (`proc.kill()`, `proc.terminate()`), and restoring the real `docker`
+          while `hang(self, "docker")` makes every docker run time out before
+          it starts. Fail when a test calls `os.kill` or `os.killpg`, runs kill,
+          pkill or a docker command that changes containers, or restores the
+          real `send` or `docker` before acting on a pid or container it did
+          not start.
   path_instructions:
     - path: "portly"
-      instructions: >-
+      instructions: |-
         A single stdlib-only Python 3.9 script: no third-party imports and no
         syntax newer than 3.9. macOS is the main platform, Linux should not break.
+        portly stops real dev servers, so check these rules on every change:
+        - Every signal goes through `send()` and every docker command that changes
+          containers through `docker()`; the tests fence both. Only signal 0
+          (a liveness check) may call `os.kill` directly.
+        - When kill frees a port, signal only pids that listen on it. A restart
+          signals only the launcher and its descendants from its restart plan.
+          Never signal a listener that is Docker itself (`is_docker_itself`);
+          containers are stopped through docker.
+        - Every command whose output portly reads (lsof, ps, git and `docker ps`
+          through `run()`) and every docker change through `docker()` has a
+          timeout; interactive commands (following logs, open, the clipboard)
+          run without one. A timeout means "unknown", never "empty": only a
+          hanging `docker ps` may count as no containers, a hanging lsof is no
+          empty port list.
+        - Output and arguments of other processes can hold bytes that are not
+          UTF-8; reading them must never raise.
+        - wt's registry entries (`.git/<name>-worktrees/<n>.env`) come in two
+          formats: `REG_PORTS=role=port role=port` from current wt, and one
+          `REG_<ROLE>=port` line per port from older engines. Read both.
+        - User-facing text, commands and flags are English. The old Dutch
+          command names stay as hidden aliases in COMMANDS: never shown in help,
+          never removed.
+        - The live view uses curses and must work in Apple Terminal with
+          TERM=xterm-256color: keypad stays off, portly decodes keys and mouse
+          escapes itself.
     - path: "test_portly.py"
-      instructions: >-
+      instructions: |-
         unittest, run with `python3 -m unittest`. A test may only signal or stop
-        processes the test run started itself, never a real dev server or container.
+        processes the test run started itself, never a real dev server or
+        container: fixture ports such as 20110 can be live servers on the
+        author's machine. Code under test signals through the fenced
+        `portly.send` and changes containers through `portly.docker`, which the
+        tests refuse unless `hang(self, "docker")` makes every docker run time
+        out; a test stops a process it started through its own
+        `subprocess.Popen` handle.
+        Fixture project, repo and container names are generic (such as shop and
+        blog), never names of real companies, clients or products.
 chat:
   auto_reply: true
