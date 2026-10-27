@@ -11,6 +11,44 @@ reviews:
   pre_merge_checks:
     docstrings:
       mode: "off"
+    title:
+      mode: warning
+      requirements: >-
+        A conventional-commit title: a lowercase type (feat, fix, chore,
+        refactor, docs or test), a colon, and a short summary of what changed.
+    custom_checks:
+      - name: Stdlib and Python 3.9
+        mode: warning
+        instructions: >-
+          Pass when `portly` and `test_portly.py` import only modules from the
+          Python standard library and use no syntax or standard-library API
+          added after Python 3.9, such as match statements, `X | Y` unions
+          evaluated at runtime, `zip(strict=...)`, `itertools.pairwise`,
+          `tomllib` or `except*`. Fail otherwise.
+      - name: Behaviour change has a test
+        mode: warning
+        instructions: >-
+          Pass when the PR does not change what `portly` does, or when it also
+          adds or changes a test in `test_portly.py` that exercises the changed
+          behaviour. Comments, docstrings, formatting and renames that keep the
+          behaviour are no behaviour change. Fail when `portly` behaves
+          differently and no test in `test_portly.py` covers the difference.
+      - name: Tests stay fenced
+        mode: warning
+        instructions: >-
+          Pass when `test_portly.py` is unchanged, or when no added or changed
+          test can signal or stop a process the test run did not start itself.
+          Signals must go through `portly.send`, which the tests fence to
+          descendants of the test run, and docker changes through
+          `portly.docker`, which the tests refuse; replacing either with a stub
+          that records instead of acting also passes, and so does stopping a
+          process the test started through its own `subprocess.Popen` handle
+          (`proc.kill()`, `proc.terminate()`), and restoring the real `docker`
+          while `hang(self, "docker")` makes every docker run time out before
+          it starts. Fail when a test calls `os.kill` or `os.killpg`, runs kill,
+          pkill or a docker command that changes containers, or restores the
+          real `send` or `docker` before acting on a pid or container it did
+          not start.
   path_instructions:
     - path: "portly"
       instructions: |-
