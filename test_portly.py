@@ -370,6 +370,7 @@ class LiveTerminalTest(unittest.TestCase):
         self.addCleanup(self.view.wait)
         self.addCleanup(self.view.kill)
         self.output, self.mark = b"", 0
+        self.expect(self.port, wait=30)  # the first scan may sit out a docker ps that hangs for its 10 s
 
     def resize(self, rows, columns):
         self.mark = len(getattr(self, "output", b""))
@@ -386,9 +387,9 @@ class LiveTerminalTest(unittest.TestCase):
         self.output += chunk
         return bool(chunk)
 
-    def expect(self, text):
+    def expect(self, text, wait=10):
         """Wait until the view draws text, after the last key or resize."""
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + wait
         while text.encode() not in self.output[self.mark:]:
             self.assertLess(time.monotonic(), deadline, f"{text!r} never drawn; got {self.output[-1500:]!r}")
             self.assertTrue(self.read(0.2), f"the view closed: {self.output[-1500:]!r}")
@@ -414,13 +415,11 @@ class LiveTerminalTest(unittest.TestCase):
         self.assertNotIn(b"Traceback", self.output)
 
     def test_draws_the_server_takes_keys_and_quits(self):
-        self.expect(self.port)
         self.press("\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[H", "\x1b[<64;3;3M", "\x1b[<0;3;3M", "a")
         self.press("/", "x", "\x7f", "\x1b")
         self.quit()
 
     def test_survives_a_window_too_small_and_comes_back(self):
-        self.expect(self.port)
         for rows, columns in [(8, 40), (2, 10), (1, 1)]:
             self.resize(rows, columns)
             self.press("\x1b[B")
