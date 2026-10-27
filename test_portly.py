@@ -883,6 +883,37 @@ class CommandTest(unittest.TestCase):
             "command", "cwd", "folder_gone", "running_seconds", "memory_kb",
             "log", "parent", "connections", "restart", "restart_problem"]))
 
+    def test_kill_frees_a_port_and_knows_a_free_one(self):
+        _, port = self.serve()
+        free = unused_port()
+        code, out, _ = self.call("kill", str(port), str(free))
+        self.assertEqual(code, 0)
+        self.assertIn(f"{port} is free.", out)
+        self.assertIn(f"{free} is already free.", out)
+        self.assertEqual(portly.listening_pids(port), [])
+
+    def test_kill_by_word_needs_yes_without_a_terminal(self):
+        _, port = self.serve()
+        code, _, err = self.call("kill", self.word)
+        self.assertEqual(code, 2)
+        self.assertIn("add -y", err)
+        self.assertNotEqual(portly.listening_pids(port), [])
+        self.assertEqual(self.call("kill", self.word, "-y")[0], 0)
+        self.assertEqual(portly.listening_pids(port), [])
+
+    def test_restart_brings_a_port_back_under_a_new_pid(self):
+        proc, port = self.serve(log=True)
+        self.addCleanup(lambda: [portly.send(pid, portly.signal.SIGKILL) for pid in portly.listening_pids(port)])
+        code, out, _ = self.call("restart", str(port))
+        self.assertEqual(code, 0, out)
+        self.assertIn("listens again", out)
+        new = portly.listening_pids(port)
+        self.assertTrue(new and proc.pid not in new)
+
+    def test_restart_of_a_free_port_has_nothing_to_do(self):
+        free = unused_port()
+        self.assertIn(f"{free} is not listening: there is nothing to restart.", self.call("restart", str(free))[1])
+
 
 HOME_DIR = os.path.expanduser("~")
 
