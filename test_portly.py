@@ -419,6 +419,18 @@ class LiveTerminalTest(unittest.TestCase):
         self.press("/", "x", "\x7f", "\x1b")
         self.quit()
 
+    def test_survives_a_window_too_small_and_comes_back(self):
+        self.expect(self.port)
+        for rows, columns in [(8, 40), (2, 10), (1, 1)]:
+            self.resize(rows, columns)
+            self.press("\x1b[B")
+            self.assertIsNone(self.view.poll(), self.output[-1500:])
+        self.resize(8, 40)
+        self.expect("make the window bigger")
+        self.resize(30, 100)
+        self.expect(self.port)
+        self.quit()
+
 
 class StartTest(unittest.TestCase):
     def start(self, argv, terminal):
