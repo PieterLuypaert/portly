@@ -1168,6 +1168,7 @@ class FuzzTest(unittest.TestCase):
     ROUNDS = 1000
     CHARS = [c for c in map(chr, range(0x20, 0x3000)) if c != "\t" and len(f"a{c}a".splitlines()) == 1]
     ADDRESS = ["*", "127.0.0.1", "[::1]", "[fe80::1%lo0]", "0.0.0.0", ":", "."]
+    KEY_NAMES = {"up", "down", "left", "right", "home", "end", "pgup", "pgdn", "delete", "enter", "backspace", "esc"}
 
     def setUp(self):
         self.random = random.Random(1027)
@@ -1246,6 +1247,31 @@ class FuzzTest(unittest.TestCase):
                 entry.write("\n".join(lines))
             for stack in self.survives(portly.read_stacks, common, given="\n".join(lines)):
                 self.assertTrue(all(isinstance(port, int) for port in stack.ports.values()), stack.ports)
+
+    def test_any_command_line(self):
+        pieces = ["node", "pnpm", "python3", "/usr/bin/", "./", "-", "--port", " ", "server.js"]
+        folder = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, folder)
+        for _ in range(self.ROUNDS):
+            args = self.random.choice([self.mix(pieces), self.text(), self.mix(pieces) + " " + self.text()])
+            self.survives(portly.short_command, args)
+            self.survives(portly.runner_name, args)
+            self.survives(portly.label, listener(args=args))
+            self.survives(portly.restart_argv, args, folder)
+
+    def test_any_terminal_input(self):
+        pieces = ["\x1b", "[", "O", "<", ";", "M", "m", "~", "A", "1", "5", "64", "\r", "\x7f", "\x00", "\x03",
+                  "\x1b[A", "\x1bOB", "\x1b[5~", "\x1b[1;2B", "\x1b[<64;3;3M", "\x1b[<0;12;8M", "\x1b[<0;12;8m",
+                  "\x1b[M`!(", "\x1b[M !("]
+        for _ in range(self.ROUNDS):
+            typed = self.random.choice([self.mix(pieces, 16), self.text(), self.mix(pieces) + self.text()])
+            reader, keys = portly.KeyReader(FakeScreen(typed)), []
+            while reader.screen.queue:
+                keys.append(self.survives(reader.read, given=typed))
+            for key in keys:
+                known = (key is None or key in self.KEY_NAMES or (isinstance(key, str) and len(key) == 1)
+                         or (isinstance(key, tuple) and key[0] in ("click", "wheel")))
+                self.assertTrue(known, f"{typed!r} read as {key!r}")
 
 
 if __name__ == "__main__":
