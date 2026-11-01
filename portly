@@ -502,10 +502,11 @@ def drop_helpers(rows: List[Listener]) -> List[Listener]:
     return [item for item in rows if item.ppid not in pids]
 
 
-# Docker's own processes publish container ports on the host (Docker Desktop's
-# com.docker.backend, docker-proxy on Linux). When docker does not say which
+# Container runtimes publish container ports on the host from a process of
+# their own: Docker Desktop's com.docker.backend, docker-proxy on Linux,
+# OrbStack Helper and Podman machine's gvproxy. When docker does not say which
 # container a port is, such a port looks like a plain process.
-DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*")
+DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|OrbStack.*|gvproxy")
 LEAVE_DOCKER = "that is Docker itself, not one container: portly leaves it running"
 
 

@@ -891,6 +891,12 @@ class StopTest(unittest.TestCase):
         procs = {40: (1, "node server.js"), 41: (40, DOCKER_BACKEND), 42: (40, "php-fpm: pool www")}
         self.assertEqual(portly.own_pids(listener(8000, 40), procs), [42, 40])
 
+    def test_never_counts_another_runtime_as_part_of_a_server(self):
+        for runtime, (_, args) in RUNTIME_FORWARDERS.items():
+            with self.subTest(runtime):
+                procs = {40: (1, "node server.js"), 41: (40, args), 42: (40, "php-fpm: pool www")}
+                self.assertEqual(portly.own_pids(listener(8000, 40), procs), [42, 40])
+
     def test_names_a_port_it_may_not_free(self):
         proc, port = self.serve(ignore_term=False)
         original = portly.send
@@ -910,6 +916,20 @@ class StopTest(unittest.TestCase):
             port = server.getsockname()[1]
             item = listener(port, 5975, args=DOCKER_BACKEND, cwd=HOME_DIR, command="com.docker.backend")
             self.assertEqual(portly.stop_many([item]), {port: portly.LEAVE_DOCKER})
+        self.assertEqual(signalled, [])
+
+    def test_leaves_the_port_forwarders_of_other_runtimes_alone(self):
+        signalled = []
+        self.addCleanup(setattr, portly, "send", portly.send)
+        portly.send = lambda pid, sig: signalled.append((pid, sig)) or "test refused to signal"
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            for runtime, (command, args) in RUNTIME_FORWARDERS.items():
+                with self.subTest(runtime):
+                    item = listener(port, 5975, args=args, cwd=HOME_DIR, command=command)
+                    self.assertEqual(portly.stop_many([item]), {port: portly.LEAVE_DOCKER})
         self.assertEqual(signalled, [])
 
     @unittest.skipUnless(has_ipv6_loopback(), "no IPv6 loopback")
@@ -943,6 +963,15 @@ class StopTest(unittest.TestCase):
 
 
 DOCKER_BACKEND = "/Applications/Docker.app/Contents/MacOS/com.docker.backend services"
+# Other container runtimes publish container ports from a process of their
+# own: per runtime, lsof's command name and ps's command line of that process.
+RUNTIME_FORWARDERS = {
+    "OrbStack": ("OrbStack Helper", "/Applications/OrbStack.app/Contents/Frameworks/OrbStack Helper.app"
+                 "/Contents/MacOS/OrbStack Helper vmgr -build-id macho:05775f98 -handoff"),
+    "Podman machine": ("gvproxy", "/opt/podman/bin/gvproxy -mtu 1500 -ssh-port 56029 -listen-vfkit"
+                       " unixgram:///var/folders/x/T/podman/podman-machine-default-gvproxy.sock"
+                       " -pid-file /var/folders/x/T/podman/gvproxy.pid -log-file /var/folders/x/T/podman/gvproxy.log"),
+}
 
 
 PROCS = {
@@ -1005,6 +1034,13 @@ class RestartPlanTest(unittest.TestCase):
         self.assertNotIn("portly kill 3306", portly.hints_for(docker))
         self.assertTrue(portly.is_docker_itself(listener(3306, 5975, command="com.docke")))
         self.assertFalse(portly.is_docker_itself(listener(3000, 1, args="node /x/docker-tools/server.js")))
+
+    def test_refuses_the_port_forwarders_of_other_runtimes(self):
+        for runtime, (command, args) in RUNTIME_FORWARDERS.items():
+            with self.subTest(runtime):
+                forwarder = listener(8080, 5975, args=args, cwd=HOME_DIR, command=command)
+                self.assertEqual(portly.plan_restart(forwarder, {}, {}), (None, portly.LEAVE_DOCKER))
+                self.assertNotIn("portly kill 8080", portly.hints_for(forwarder))
 
     def test_hands_a_wt_server_its_pid_file(self):
         with tempfile.TemporaryDirectory() as folder:
