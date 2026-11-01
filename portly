@@ -1658,6 +1658,9 @@ class LiveView:
         item, group = self.current(), self.current_group()
         if not item or not group:
             return
+        if self.busy:  # one at a time: two could act on the same port, and the first to end would hide the other
+            self.say("still busy, one stop or restart at a time", DIM)
+            return
         verb = "Stop" if action == "stop" else "Restart"
         if action == "restart" and not whole_group and not (item.container or item.restart):
             self.say(f"{item.port} cannot restart: {item.restart_problem or 'no restart plan'}", DIM)
@@ -1674,6 +1677,7 @@ class LiveView:
     def run_in_background(self, action: str, targets: List[Listener]) -> None:
         names = " ".join(str(item.port) for item in targets)
         self.busy = f"stopping {names}" if action == "stop" else f"restarting {names}, waiting until it listens again"
+        self.message = ""  # the spinner line shows only what is said while it runs
 
         def work() -> None:
             try:
@@ -1790,6 +1794,7 @@ class LiveView:
 
     def footer_segments(self, width: int) -> Tuple[List[Segment], bool]:
         """The bottom line, and whether it is an input line."""
+        said = [(" " + self.message, self.message_tone)] if self.message and time.monotonic() - self.message_at < 6 else []
         if self.confirm:
             question = clip(self.confirm[0], width - 14)
             return [(" " + question, GONE), ("  y", BOLD), ("es / ", DIM), ("n", BOLD), ("o", DIM)], False
@@ -1798,9 +1803,10 @@ class LiveView:
                     ("   enter done · esc clears", DIM)], True
         if self.busy:
             frame = SPINNER[int(time.monotonic() * 8) % len(SPINNER)]
-            return [(f" {frame} ", ACCENT), (self.busy, "")], False
-        if self.message and time.monotonic() - self.message_at < 6:
-            return [(" " + self.message, self.message_tone)], False
+            busy = clip(self.busy, width - 6 - sum(len(text) for text, _ in said))
+            return [(f" {frame} ", ACCENT), (busy, ""), ("  ", "")] + said, False
+        if said:
+            return said, False
         item = self.current()
         possible = {"o": bool(item and url_of(item)), "c": bool(item and url_of(item)),
                     "r": bool(item and (item.container or item.restart)),

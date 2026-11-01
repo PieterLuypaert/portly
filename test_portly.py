@@ -299,6 +299,31 @@ class LiveViewTest(unittest.TestCase):
         self.assertEqual((self.view.busy, self.view.message), ("", "stop failed: lsof went away"))
         self.assertEqual(self.scanner.refreshed, 1)
 
+    def test_a_second_stop_is_refused_while_the_first_runs(self):
+        release, stopped = threading.Event(), []
+
+        def slow(rows):
+            stopped.append([item.port for item in rows])
+            release.wait(5)
+            return {item.port: None for item in rows}
+
+        self.addCleanup(release.set)
+        self.addCleanup(setattr, portly, "stop_many", portly.stop_many)
+        portly.stop_many = slow
+        self.press("k", "n", "k", "y")
+        self.assertEqual(self.view.message, "")
+        self.press("down", "k")
+        self.assertIsNone(self.view.confirm)
+        wide, narrow = ("".join(text for text, _ in self.view.footer_segments(width)[0])[3:] for width in (200, 60))
+        self.assertEqual(wide, "stopping 3000   still busy, one stop or restart at a time")
+        # put leaves the last of the 60 columns empty
+        self.assertEqual(narrow, "stopping 30…   still busy, one stop or restart at a time")
+        release.set()
+        deadline = time.monotonic() + 2
+        while self.view.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual((stopped, self.view.busy, self.view.message), ([[3000]], "", "3000 is free"))
+
     def test_scrolls_to_show_the_header_of_the_selected_group(self):
         lines = portly.group_lines(self.view.groups, 100)
         self.view.selected, self.view.scroll = 20110, 0
