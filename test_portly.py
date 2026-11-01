@@ -464,6 +464,11 @@ class StartTest(unittest.TestCase):
         self.assertEqual(self.start([], terminal=False), "show")
         self.assertEqual(portly.COMMANDS["list"].__name__, "cmd_show")
 
+    def test_a_kill_flag_in_a_group_prints_too(self):
+        self.assertEqual(self.start(["-ak", "shop", "-y"], terminal=True), "show")
+        self.assertEqual(self.start(["shop", "-ka"], terminal=True), "show")
+        self.assertEqual(self.start(["-a", "kshop"], terminal=True), "live")
+
     def test_the_kill_flag_hands_the_rest_to_kill(self):
         handed = []
         self.addCleanup(setattr, portly, "interactive", portly.interactive)
