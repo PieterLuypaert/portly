@@ -1698,12 +1698,7 @@ class LiveView:
     def handle(self, key) -> bool:
         """Act on a key; False to leave."""
         if self.confirm:
-            _, targets, action = self.confirm
-            self.confirm = None
-            if key in ("y", "Y"):
-                self.run_in_background(action, targets)
-            else:
-                self.say("nothing stopped" if action == "stop" else "nothing restarted", DIM)
+            self.answer(key)
             return True
         if self.editing:
             return self.edit_filter(key)
@@ -1730,6 +1725,18 @@ class LiveView:
             self.show_all = not self.show_all
             self.rebuild()
         return True
+
+    def answer(self, key) -> None:
+        """y says yes; n, esc and enter say no, as [y/N] does. Any other key, a
+        resize or the mouse included, leaves the question open."""
+        if key not in ("y", "Y", "n", "N", "esc", "enter"):
+            return
+        _, targets, action = self.confirm
+        self.confirm = None
+        if key in ("y", "Y"):
+            self.run_in_background(action, targets)
+        else:
+            self.say("nothing stopped" if action == "stop" else "nothing restarted", DIM)
 
     def edit_filter(self, key) -> bool:
         if key == "enter":

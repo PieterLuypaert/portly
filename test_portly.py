@@ -259,6 +259,21 @@ class LiveViewTest(unittest.TestCase):
         self.press("y")
         self.assertEqual(stopped, [[20110, 20111]])
 
+    def test_only_y_n_esc_or_enter_answer_the_question(self):
+        stopped = []
+        self.view.run_in_background = lambda action, targets: stopped.append([item.port for item in targets])
+        self.view.row_at = {7: 8000}
+        self.press("k", "resize", ("wheel", 1), ("click", 7), "down", "q", "x")
+        self.assertEqual((self.view.confirm[0], self.view.selected, self.view.message, stopped),
+                         ("Stop 3000 vite?", 3000, "", []))
+        for key in ("n", "N", "esc", "enter"):
+            with self.subTest(key=key):
+                self.view.message = ""
+                self.press("k", key)
+                self.assertEqual((self.view.confirm, self.view.message, stopped), (None, "nothing stopped", []))
+        self.press("k", "Y")
+        self.assertEqual(stopped, [[3000]])
+
     def test_asks_before_restarting_and_says_when_it_cannot(self):
         done = []
         self.view.run_in_background = lambda action, targets: done.append((action, [item.port for item in targets]))
