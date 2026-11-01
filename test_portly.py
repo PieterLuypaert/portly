@@ -560,6 +560,22 @@ class GroupTest(unittest.TestCase):
         ])
 
 
+def stack_rows():
+    """A server and a container in stack wt1 and in stack wt10 of shop. The
+    wt10 worktree's branch names wt1, as a branch may."""
+    rows = []
+    for index, branch in ((1, "feat/cart"), (10, "fix/kill-wt1-matches-wt10")):
+        tree = place(branch=branch, is_worktree=True, top=f"/t/{index}")
+        stack = portly.Stack("shop", index, f"/t/{index}", {})
+        server = listener(20100 + 10 * index, index, args="symfony server:start", cwd=HOME_DIR, place=tree)
+        db = listener(20101 + 10 * index, 99, args="/Applications/Docker.app/Contents/MacOS/com.docker.backend",
+                      cwd="/", place=tree)
+        db.container = portly.Container(f"shop-wt{index}-db-1", "mysql", "Up", f"shop-wt{index}", "db", f"/t/{index}")
+        server.stack = db.stack = stack
+        rows += [server, db]
+    return rows
+
+
 class FilterTest(unittest.TestCase):
     def rows(self):
         web = listener(3000, 1, args="node x/node_modules/.bin/vite", cwd=HOME_DIR + "/shop/apps/web",
@@ -578,6 +594,25 @@ class FilterTest(unittest.TestCase):
         self.assertEqual(self.ports(["fix/cart"]), [20110])
         self.assertEqual(self.ports(["VITE"]), [3000])
         self.assertEqual(self.ports(["wt1"]), [20110])
+
+    def in_stacks(self, terms, rows=None):
+        return [item.port for item in portly.visible(rows or stack_rows(), terms, False)]
+
+    def test_a_stack_word_picks_that_stack_alone(self):
+        self.assertEqual(self.in_stacks(["wt1"]), [20110, 20111])
+        self.assertEqual(self.in_stacks(["WT10"]), [20200, 20201])
+        self.assertEqual(self.in_stacks(["wt2"]), [])
+
+    def test_other_words_still_match_inside_a_name(self):
+        self.assertEqual(self.in_stacks(["wt"]), [20110, 20111, 20200, 20201])
+        self.assertEqual(self.in_stacks(["kill-wt1"]), [20200, 20201])
+
+    def test_a_stack_word_finds_the_containers_of_a_stack_wt_no_longer_lists(self):
+        rows = stack_rows()
+        for item in rows:
+            item.stack = None
+        self.assertEqual(self.in_stacks(["wt1"], rows), [20111])
+        self.assertEqual(self.in_stacks(["wt10"], rows), [20201])
 
     def test_any_word_may_match(self):
         self.assertEqual(self.ports(["vite", "symfony"]), [3000, 20110])

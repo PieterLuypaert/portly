@@ -782,11 +782,26 @@ def haystack(item: Listener) -> str:
     return "\n".join(words).lower()
 
 
+# A filter word that names one wt stack whole: wt1 is not part of wt10.
+STACK_WORD = re.compile(r"wt\d+")
+
+
+def stack_word(item: Listener) -> str:
+    """wt<n> for a port of wt's stack n, known from wt's registry or, once its
+    entry is gone, from the compose project <name>-wt<n>; else empty."""
+    if item.stack:
+        return f"wt{item.stack.index}"
+    project = re.fullmatch(r".+-(wt\d+)", item.container.project) if item.container else None
+    return project.group(1) if project else ""
+
+
 def matches(item: Listener, terms: List[str]) -> bool:
     """True when any of the filter words occurs in the port's project, branch,
-    folder, tool or container."""
-    text = haystack(item)
-    return any(term.lower() in text for term in terms)
+    folder, tool or container. A stack word such as wt1 only matches the ports
+    of that stack, not those of wt10 or a branch or folder that contains it."""
+    text, stack = haystack(item), stack_word(item)
+    return any(term == stack if STACK_WORD.fullmatch(term) else term in text
+               for term in map(str.lower, terms))
 
 
 def terminal_width() -> int:
