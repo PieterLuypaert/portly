@@ -460,6 +460,45 @@ class StartTest(unittest.TestCase):
             self.assertIs(portly.COMMANDS[dutch], portly.COMMANDS[english], dutch)
 
 
+class ToolTroubleTest(unittest.TestCase):
+    """Without lsof, or with a tool that does not answer, portly stops with a
+    message that names the tool: never an empty list, never a traceback."""
+
+    def setUp(self):
+        self.addCleanup(setattr, sys, "stdin", sys.stdin)
+        sys.stdin = io.StringIO()  # no terminal: a question gets no answer instead of waiting
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = portly.main(list(argv))
+            except SystemExit as stop:
+                code = stop.code
+        return code, out.getvalue(), err.getvalue()
+
+    def without_lsof(self):
+        empty = tempfile.mkdtemp(prefix="portly-path-")
+        self.addCleanup(os.rmdir, empty)
+        self.addCleanup(os.environ.__setitem__, "PATH", os.environ["PATH"])
+        os.environ["PATH"] = empty
+
+    def test_stops_at_the_start_without_lsof(self):
+        self.without_lsof()
+        port = str(unused_port())
+        for argv in (["list"], [], ["free"], ["wait", port, "-t", "0.3"], ["kill", port], ["open", port]):
+            code, out, err = self.call(*argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertIn("portly needs lsof", err, argv)
+
+    def test_help_needs_no_lsof(self):
+        self.without_lsof()
+        code, out, _ = self.call("-h")
+        self.assertEqual(code, 0)
+        self.assertIn("usage: portly", out)
+        self.assertEqual(self.call("kill", "--help")[0], 0)
+
+
 class JsonTest(unittest.TestCase):
     def test_describes_a_worktree_process(self):
         item = listener(20110, 7, args="node server.js", cwd="/t/apps/web",

@@ -2017,6 +2017,11 @@ COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_r
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
+    # run() reads a missing tool as no output, so without lsof nothing would seem to listen.
+    if not shutil.which("lsof") and not {"-h", "--help"} & set(argv):
+        print("portly needs lsof: install it, or add the folder it is in (often /usr/sbin) to PATH.",
+              file=sys.stderr)
+        return 2
     if argv and argv[0] in COMMANDS:
         return COMMANDS[argv[0]](argv[1:])
     return cmd_start(argv)
