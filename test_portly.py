@@ -80,6 +80,15 @@ def hang(test, program):
     test.addCleanup(setattr, subprocess, "run", real)
 
 
+def has_ipv6_loopback():
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
 def listener(port=3000, pid=1, args="", cwd="", ppid=0, place=None, command="node"):
     return portly.Listener(port, pid, command, ppid=ppid, args=args, cwd=cwd, place=place)
 
@@ -773,15 +782,25 @@ class DetailTest(unittest.TestCase):
 
 
 class StopTest(unittest.TestCase):
-    def serve(self, ignore_term):
-        """A throwaway listener on a free port; returns the process and port."""
-        code = (
-            "import signal, socket, sys, time\n"
-            f"if {ignore_term}: signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
-            "print(s.getsockname()[1], flush=True); time.sleep(60)\n"
-        )
-        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    def serve(self, ignore_term, host="127.0.0.1", port=0, worker=False):
+        """A throwaway listener, on a free port unless one is given; returns
+        the process and port. It runs from node_modules/.bin/vite, so portly
+        names it vite. A worker is a forked child on the same socket, as
+        php-fpm has."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        script = os.path.join(folder.name, "node_modules", ".bin", "vite")
+        os.makedirs(os.path.dirname(script))
+        with open(script, "w") as file:
+            file.write(
+                "import os, signal, socket, time\n"
+                f"if {ignore_term}: signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                f"s = socket.socket(socket.AF_INET6 if ':' in {host!r} else socket.AF_INET)\n"
+                f"s.bind(({host!r}, {port})); s.listen()\n"
+                f"if {worker} and os.fork() == 0: time.sleep(60); os._exit(0)\n"
+                "print(s.getsockname()[1], flush=True); time.sleep(60)\n"
+            )
+        proc = subprocess.Popen([sys.executable, script], stdout=subprocess.PIPE, text=True)
         self.addCleanup(proc.stdout.close)
         self.addCleanup(proc.wait)
         self.addCleanup(proc.kill)
@@ -801,6 +820,29 @@ class StopTest(unittest.TestCase):
         servers = [self.serve(ignore_term=False) for _ in range(3)]
         rows = [listener(port, proc.pid) for proc, port in servers]
         self.assertEqual(portly.stop_many(rows), {port: None for _, port in servers})
+
+    @unittest.skipUnless(has_ipv6_loopback(), "no IPv6 loopback")
+    def test_leaves_another_server_on_the_port_running(self):
+        stopped, port = self.serve(ignore_term=False)
+        other, _ = self.serve(ignore_term=False, host="::1", port=port)
+        self.assertEqual(portly.stop_many([listener(port, stopped.pid)]),
+                         {port: f"pid {other.pid} (vite) listens on it"})
+        self.assertEqual(stopped.wait(timeout=5), -15)
+        self.assertIsNone(other.poll())
+
+    def test_kills_the_workers_that_share_the_port_of_their_parent(self):
+        proc, port = self.serve(ignore_term=True, worker=True)
+        self.assertEqual(portly.stop_many([listener(port, proc.pid)]), {port: None})
+        self.assertEqual(proc.wait(timeout=5), -9)
+
+    def test_names_everything_that_keeps_a_port_taken(self):
+        holders = [listener(3000, 42, command="node"), listener(3000, 7, command="Python")]
+        procs = {7: (1, "python3 -m http.server 3000"), 42: (1, "node /x/node_modules/.bin/vite")}
+        self.assertEqual(portly.taken_by(holders, procs), "pid 7 (python3 http.server), pid 42 (vite) listen on it")
+
+    def test_never_counts_docker_itself_as_part_of_a_server(self):
+        procs = {40: (1, "node server.js"), 41: (40, DOCKER_BACKEND), 42: (40, "php-fpm: pool www")}
+        self.assertEqual(portly.own_pids(listener(8000, 40), procs), [42, 40])
 
     def test_names_a_port_it_may_not_free(self):
         proc, port = self.serve(ignore_term=False)
@@ -822,6 +864,23 @@ class StopTest(unittest.TestCase):
             item = listener(port, 5975, args=DOCKER_BACKEND, cwd=HOME_DIR, command="com.docker.backend")
             self.assertEqual(portly.stop_many([item]), {port: portly.LEAVE_DOCKER})
         self.assertEqual(signalled, [])
+
+    @unittest.skipUnless(has_ipv6_loopback(), "no IPv6 loopback")
+    def test_leaves_docker_beside_a_server_alone(self):
+        # A local server and a container's port on one port, while docker ps does not answer.
+        stubborn, port = self.serve(ignore_term=True)
+        backend, _ = self.serve(ignore_term=False, host="::1", port=port)
+        real = portly.read_processes
+        self.addCleanup(setattr, portly, "read_processes", real)
+        portly.read_processes = lambda: {**real(), backend.pid: (os.getpid(), DOCKER_BACKEND)}
+        signalled = []
+        fenced = portly.send
+        self.addCleanup(setattr, portly, "send", fenced)
+        portly.send = lambda pid, sig: signalled.append((pid, sig)) or fenced(pid, sig)
+        self.assertEqual(portly.stop_many([listener(port, stubborn.pid)]),
+                         {port: f"pid {backend.pid} (com.docker.backend) listens on it"})
+        self.assertEqual(signalled, [(stubborn.pid, portly.signal.SIGTERM), (stubborn.pid, portly.signal.SIGKILL)])
+        self.assertIsNone(backend.poll())
 
     def test_names_a_docker_that_does_not_answer(self):
         hang(self, "docker")

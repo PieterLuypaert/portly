@@ -924,6 +924,25 @@ def wait_for_ports(ports: List[int], seconds: float) -> set:
         time.sleep(0.1)
 
 
+def listeners_by_port() -> Dict[int, List[Listener]]:
+    found: Dict[int, List[Listener]] = {}
+    for item in parse_lsof(run(LSOF_LISTEN)):
+        found.setdefault(item.port, []).append(item)
+    return found
+
+
+def wait_until_gone(pids: Dict[int, List[int]], seconds: float) -> Dict[int, List[Listener]]:
+    """Wait until none of the pids listens on its port any more; what listens
+    per port when that is so or time is up."""
+    deadline = time.monotonic() + seconds
+    while True:
+        found = listeners_by_port()
+        left = any(item.pid in pids.get(port, ()) for port, items in found.items() for item in items)
+        if not left or time.monotonic() > deadline:
+            return found
+        time.sleep(0.1)
+
+
 def docker(args: List[str], timeout: float) -> subprocess.CompletedProcess:
     """Run a docker command that changes containers; one place, so tests can fence it off.
     A docker that does not answer in time fails with that as its reason."""
@@ -946,10 +965,42 @@ def send(pid: int, sig: int) -> Optional[str]:
     return None
 
 
+def own_pids(item: Listener, procs: Dict[int, Tuple[int, str]]) -> List[int]:
+    """What stopping item may SIGKILL: item and what runs under it, such as
+    php-fpm's workers on its socket, never Docker itself. Children come before
+    their parent, so none is signalled after its parent is gone and it was
+    handed to launchd."""
+    under = [pid for pid in descendants(item.pid, procs)[::-1]
+             if not is_docker_itself(Listener(item.port, pid, "", args=procs[pid][1]))]
+    return under + [item.pid]
+
+
+def kill_late(late: Dict[int, List[int]]) -> Dict[int, str]:
+    """SIGKILL the pids that outlived their SIGTERM; per port the reason when that is not allowed."""
+    problems = {}
+    for port, pids in late.items():
+        for pid in pids:
+            problem = send(pid, signal.SIGKILL)
+            if problem:
+                problems[port] = problem
+    return problems
+
+
+def taken_by(holders: List[Listener], procs: Dict[int, Tuple[int, str]]) -> str:
+    """Who keeps a port taken: pid 123 (vite) listens on it. lsof only names
+    the executable, node for vite, so the name comes from the command line."""
+    for item in holders:
+        item.args = procs.get(item.pid, (0, ""))[1]
+    names = ", ".join(f"pid {item.pid} ({label(item)})" for item in sorted(holders, key=lambda item: item.pid))
+    return f"{names} {'listens' if len(holders) == 1 else 'listen'} on it"
+
+
 def stop_many(rows: List[Listener]) -> Dict[int, Optional[str]]:
     """Free the ports of rows: one docker stop for the containers, SIGTERM for
-    the processes and after five seconds SIGKILL for whatever still listens on
-    their ports. Per port None once free, else the reason it is still taken."""
+    the processes and after five seconds SIGKILL for those that still listen on
+    their port. Another process on that port was never shown, so it is left
+    running. Per port None once free, else the reason it is still taken,
+    which names what still listens on it."""
     problems: Dict[int, str] = {}
     containers = [item for item in rows if item.container]
     if containers:
@@ -960,23 +1011,25 @@ def stop_many(rows: List[Listener]) -> Dict[int, Optional[str]]:
             problems.update((item.port, reason) for item in containers)
     processes = [item for item in rows if not item.container and not is_docker_itself(item)]
     problems.update((item.port, LEAVE_DOCKER) for item in rows if is_docker_itself(item))
+    procs = read_processes()
+    own = {item.port: own_pids(item, procs) for item in processes}
     for item in processes:
         problem = send(item.pid, signal.SIGTERM)
         if problem:
             problems[item.port] = problem
-    busy = wait_for_ports([item.port for item in rows if item.port not in problems], 5)
+    waiting = {item.port: own.get(item.port, [item.pid]) for item in rows if item.port not in problems}
+    found = wait_until_gone(waiting, 5)
     # Only a process gets SIGKILL: on a container's port listens Docker itself.
-    for item in processes:
-        if item.port in busy:
-            for pid in listening_pids(item.port):
-                problem = send(pid, signal.SIGKILL)
-                if problem:
-                    problems[item.port] = problem
-    if busy:
-        wait_for_ports(list(busy), 2)
-    taken = listening_ports()
-    return {item.port: problems.get(item.port, "the port stayed taken") if item.port in taken else None
-            for item in rows}
+    listening = {port: {item.pid for item in items} for port, items in found.items()}
+    late = {port: [pid for pid in pids if pid in listening.get(port, ())]
+            for port, pids in own.items() if port in waiting}
+    problems.update(kill_late(late))
+    if any(late.values()):
+        found = wait_until_gone(late, 2)
+    if any(item.port in found and item.port not in problems for item in rows):
+        procs = read_processes()  # a supervisor may have started the server again
+    return {item.port: (problems.get(item.port) or taken_by(found[item.port], procs)) if item.port in found
+            else None for item in rows}
 
 
 def stop(item: Listener) -> Optional[str]:
