@@ -259,6 +259,21 @@ class LiveViewTest(unittest.TestCase):
         self.press("y")
         self.assertEqual(stopped, [[20110, 20111]])
 
+    def test_only_y_n_esc_or_enter_answer_the_question(self):
+        stopped = []
+        self.view.run_in_background = lambda action, targets: stopped.append([item.port for item in targets])
+        self.view.row_at = {7: 8000}
+        self.press("k", "resize", ("wheel", 1), ("click", 7), "down", "q", "x")
+        self.assertEqual((self.view.confirm[0], self.view.selected, self.view.message, stopped),
+                         ("Stop 3000 vite?", 3000, "", []))
+        for key in ("n", "N", "esc", "enter"):
+            with self.subTest(key=key):
+                self.view.message = ""
+                self.press("k", key)
+                self.assertEqual((self.view.confirm, self.view.message, stopped), (None, "nothing stopped", []))
+        self.press("k", "Y")
+        self.assertEqual(stopped, [[3000]])
+
     def test_asks_before_restarting_and_says_when_it_cannot(self):
         done = []
         self.view.run_in_background = lambda action, targets: done.append((action, [item.port for item in targets]))
@@ -283,6 +298,56 @@ class LiveViewTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual((self.view.busy, self.view.message), ("", "stop failed: lsof went away"))
         self.assertEqual(self.scanner.refreshed, 1)
+
+    def test_a_second_stop_is_refused_while_the_first_runs(self):
+        release, stopped = threading.Event(), []
+
+        def slow(rows):
+            stopped.append([item.port for item in rows])
+            release.wait(5)
+            return {item.port: None for item in rows}
+
+        self.addCleanup(release.set)
+        self.addCleanup(setattr, portly, "stop_many", portly.stop_many)
+        portly.stop_many = slow
+        self.press("k", "n", "k", "y")
+        self.assertEqual(self.view.message, "")
+        self.press("down", "k")
+        self.assertIsNone(self.view.confirm)
+        wide, narrow = ("".join(text for text, _ in self.view.footer_segments(width)[0])[3:] for width in (200, 60))
+        self.assertEqual(wide, "stopping 3000   still busy, one stop or restart at a time")
+        # put leaves the last of the 60 columns empty
+        self.assertEqual(narrow, "stopping 30…   still busy, one stop or restart at a time")
+        release.set()
+        deadline = time.monotonic() + 2
+        while self.view.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual((stopped, self.view.busy, self.view.message), ([[3000]], "", "3000 is free"))
+
+    def test_a_stop_that_ends_during_a_refusal_keeps_its_outcome(self):
+        release, say = threading.Event(), self.view.say
+
+        def slow(rows):
+            release.wait(5)
+            return {item.port: None for item in rows}
+
+        def the_stop_ends_now(text, tone=""):
+            if text.startswith("still busy"):  # between ask's busy check and its refusal
+                release.set()
+                deadline = time.monotonic() + 0.5
+                while self.view.busy and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            say(text, tone)
+
+        self.addCleanup(release.set)
+        self.addCleanup(setattr, portly, "stop_many", portly.stop_many)
+        portly.stop_many = slow
+        self.view.say = the_stop_ends_now
+        self.press("k", "y", "down", "k")
+        deadline = time.monotonic() + 2
+        while self.view.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual((self.view.busy, self.view.message), ("", "3000 is free"))
 
     def test_scrolls_to_show_the_header_of_the_selected_group(self):
         lines = portly.group_lines(self.view.groups, 100)
