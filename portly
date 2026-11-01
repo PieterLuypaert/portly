@@ -9,7 +9,7 @@
   portly kill 3000     stop what listens on it: the process, or its container
   portly kill wt1      stop everything of a project or stack, after asking
   portly restart 3000  stop it and start it again the way it was started
-  portly open 3000     open http://localhost:3000 in the browser
+  portly open 3000     open http://localhost:3000 in the browser (https for symfony)
   portly logs 3000     follow its output: docker logs, or the file it writes to
   portly free 3000     the first free port from 3000 on
   portly wait 3000     wait until something listens on 3000
@@ -1834,7 +1834,7 @@ HELP = """\
   portly kill 3000 8000    stop what listens there
   portly kill wt1          stop everything of a project or stack (asks first)
   portly restart 3000      stop it and start it again the way it was started (also: restart wt1)
-  portly open 3000/admin   open http://localhost:3000/admin in your browser
+  portly open 3000/admin   open http://localhost:3000/admin in your browser (https for symfony)
   portly logs 3000         follow its output: docker logs, or the file it writes to
   portly free 3000         the first free port from 3000 on
   portly wait 3000         wait until something listens on 3000 (handy in scripts)
