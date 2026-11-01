@@ -932,6 +932,19 @@ class StopTest(unittest.TestCase):
                     self.assertEqual(portly.stop_many([item]), {port: portly.LEAVE_DOCKER})
         self.assertEqual(signalled, [])
 
+    def test_says_it_leaves_a_runtime_running_without_calling_it_docker(self):
+        self.addCleanup(setattr, portly, "send", portly.send)
+        portly.send = lambda pid, sig: "test refused to signal"
+        command, args = RUNTIME_FORWARDERS["Podman machine"]
+        with socket.socket() as server, contextlib.redirect_stdout(io.StringIO()) as out:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            port = server.getsockname()[1]
+            gvproxy = listener(port, 5975, args=args, cwd=HOME_DIR, command=command)
+            self.assertEqual(portly.kill([gvproxy], [port], [], False, portly.Paint(False)), 1)
+        self.assertIn(f"{port} is still taken: that is the container runtime itself, not one container:"
+                      " portly leaves it running", out.getvalue())
+
     @unittest.skipUnless(has_ipv6_loopback(), "no IPv6 loopback")
     def test_leaves_docker_beside_a_server_alone(self):
         # A local server and a container's port on one port, while docker ps does not answer.

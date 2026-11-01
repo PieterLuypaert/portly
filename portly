@@ -519,7 +519,7 @@ DOCKER_ITSELF = re.compile(
 # own ssh -L, is yours to stop.
 LIMA_ITSELF = re.compile(
     r"(?:^|/)(?:limactl hostagent |ssh:? .*/(?:\.lima|\.?colima/_lima|rancher-desktop/lima)/[^/]+/ssh\.sock)")
-LEAVE_DOCKER = "that is Docker itself, not one container: portly leaves it running"
+LEAVE_DOCKER = "that is the container runtime itself, not one container: portly leaves it running"
 
 
 def is_docker_itself(item: Listener) -> bool:
