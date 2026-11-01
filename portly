@@ -504,10 +504,13 @@ def drop_helpers(rows: List[Listener]) -> List[Listener]:
 
 # Container runtimes publish container ports on the host from a process of
 # their own: Docker Desktop's com.docker.backend, docker-proxy on Linux,
-# OrbStack Helper, Podman machine's gvproxy and Lima's limactl hostagent, which
-# Colima and Rancher Desktop run too. When docker does not say which container
-# a port is, such a port looks like a plain process.
-DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|OrbStack.*|gvproxy|limactl")
+# rootless Docker's rootlesskit, OrbStack Helper, Podman machine's gvproxy and
+# Lima's limactl hostagent, which Colima and Rancher Desktop run too. When
+# docker does not say which container a port is, such a port looks like a plain
+# process. Podman machine's VM (vfkit, krunkit) listens too, for its API:
+# stopping it stops every container all the same.
+DOCKER_ITSELF = re.compile(
+    r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|rootlessk.*|OrbStack.*|gvproxy|limactl|vfkit|krunkit")
 # Lima is found on the whole command line: ps joins a program's path and its
 # arguments with spaces, so /Applications/Rancher Desktop.app/.../limactl has no
 # name to read, and its ssh forwarder (Colima's default) is the ssh master on

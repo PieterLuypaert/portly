@@ -981,6 +981,16 @@ RUNTIME_FORWARDERS = {
     "Colima": ("ssh", "ssh: /Users/me/.colima/_lima/colima/ssh.sock [mux]"),
     "Colima profile, home in .config": ("ssh", "ssh: /Users/me/.config/colima/_lima/colima-work/ssh.sock [mux]"),
     "Rancher Desktop over ssh": ("ssh", "ssh: /Users/me/Library/Application Support/rancher-desktop/lima/0/ssh.sock [mux]"),
+    "rootless Docker": ("rootlesskit", "rootlesskit --state-dir=/run/user/1000/dockerd-rootless --net=slirp4netns"
+                        " --mtu=65520 --disable-host-loopback --port-driver=builtin --copy-up=/etc --copy-up=/run"
+                        " --propagation=rslave /usr/bin/dockerd-rootless.sh"),
+    # Not a forwarder: Podman machine's VM, on the port of its REST API.
+    "Podman machine VM": ("vfkit", "/opt/podman/bin/vfkit --cpus 6 --memory 2048 --device virtio-blk,path="
+                          "/Users/me/.local/share/containers/podman/machine/applehv/podman-machine-default-arm64.raw"
+                          " --restful-uri tcp://localhost:50089"),
+    "Podman machine VM on libkrun": ("krunkit", "/opt/podman/bin/krunkit --cpus 6 --memory 2048 --device virtio-blk,"
+                                     "path=/Users/me/.local/share/containers/podman/machine/libkrun"
+                                     "/podman-machine-default-arm64.raw --restful-uri tcp://localhost:50090"),
 }
 
 
