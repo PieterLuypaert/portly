@@ -986,11 +986,21 @@ def kill_late(late: Dict[int, List[int]]) -> Dict[int, str]:
     return problems
 
 
+def taken_by(holders: List[Listener], procs: Dict[int, Tuple[int, str]]) -> str:
+    """Who keeps a port taken: pid 123 (vite) listens on it. lsof only names
+    the executable, node for vite, so the name comes from the command line."""
+    for item in holders:
+        item.args = procs.get(item.pid, (0, ""))[1]
+    names = ", ".join(f"pid {item.pid} ({label(item)})" for item in sorted(holders, key=lambda item: item.pid))
+    return f"{names} {'listens' if len(holders) == 1 else 'listen'} on it"
+
+
 def stop_many(rows: List[Listener]) -> Dict[int, Optional[str]]:
     """Free the ports of rows: one docker stop for the containers, SIGTERM for
     the processes and after five seconds SIGKILL for those that still listen on
     their port. Another process on that port was never shown, so it is left
-    running. Per port None once free, else the reason it is still taken."""
+    running. Per port None once free, else the reason it is still taken,
+    which names what still listens on it."""
     problems: Dict[int, str] = {}
     containers = [item for item in rows if item.container]
     if containers:
@@ -1016,8 +1026,10 @@ def stop_many(rows: List[Listener]) -> Dict[int, Optional[str]]:
     problems.update(kill_late(late))
     if any(late.values()):
         found = wait_until_gone(late, 2)
-    return {item.port: problems.get(item.port, "the port stayed taken") if item.port in found else None
-            for item in rows}
+    if any(item.port in found and item.port not in problems for item in rows):
+        procs = read_processes()  # a supervisor may have started the server again
+    return {item.port: (problems.get(item.port) or taken_by(found[item.port], procs)) if item.port in found
+            else None for item in rows}
 
 
 def stop(item: Listener) -> Optional[str]:
