@@ -1576,7 +1576,7 @@ class LiveView:
         self.scroll = 0
         self.version, self.error, self.scanned_at = 0, "", 0.0
         self.confirm: Optional[Tuple[str, List[Listener], str]] = None  # question, targets, stop or restart
-        self.busy = ""
+        self.busy, self.busy_lock = "", threading.Lock()
         self.message, self.message_tone, self.message_at = "", "", 0.0
         self.row_at: Dict[int, int] = {}  # screen line to port, for the mouse
 
@@ -1658,9 +1658,10 @@ class LiveView:
         item, group = self.current(), self.current_group()
         if not item or not group:
             return
-        if self.busy:  # one at a time: two could act on the same port, and the first to end would hide the other
-            self.say("still busy, one stop or restart at a time", DIM)
-            return
+        with self.busy_lock:
+            if self.busy:  # one at a time: two could act on the same port, and the first to end would hide the other
+                self.say("still busy, one stop or restart at a time", DIM)
+                return
         verb = "Stop" if action == "stop" else "Restart"
         if action == "restart" and not whole_group and not (item.container or item.restart):
             self.say(f"{item.port} cannot restart: {item.restart_problem or 'no restart plan'}", DIM)
@@ -1682,18 +1683,18 @@ class LiveView:
         def work() -> None:
             try:
                 results = stop_many(targets) if action == "stop" else restart_many(targets)
-            except Exception as error:  # the view stays up and says what went wrong
-                self.say(f"{action} failed: {error}", GONE)
-            else:
                 problems = [f"{port}: {problem}" for port, problem in results.items() if problem]
                 if problems:
-                    self.say(("still taken, " if action == "stop" else "") + "; ".join(problems), GONE)
+                    outcome = (("still taken, " if action == "stop" else "") + "; ".join(problems), GONE)
                 else:
                     done = "free" if action == "stop" else "back up"
-                    self.say(f"{names} {'is' if len(targets) == 1 else 'are'} {done}", FREE)
-            finally:
+                    outcome = (f"{names} {'is' if len(targets) == 1 else 'are'} {done}", FREE)
+            except Exception as error:  # the view stays up and says what went wrong
+                outcome = (f"{action} failed: {error}", GONE)
+            with self.busy_lock:  # ask refuses under it too, so its refusal never replaces this outcome
+                self.say(*outcome)
                 self.busy = ""
-                self.scanner.refresh()
+            self.scanner.refresh()
 
         threading.Thread(target=work, daemon=True).start()
 

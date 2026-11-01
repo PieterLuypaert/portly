@@ -324,6 +324,31 @@ class LiveViewTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual((stopped, self.view.busy, self.view.message), ([[3000]], "", "3000 is free"))
 
+    def test_a_stop_that_ends_during_a_refusal_keeps_its_outcome(self):
+        release, say = threading.Event(), self.view.say
+
+        def slow(rows):
+            release.wait(5)
+            return {item.port: None for item in rows}
+
+        def the_stop_ends_now(text, tone=""):
+            if text.startswith("still busy"):  # between ask's busy check and its refusal
+                release.set()
+                deadline = time.monotonic() + 0.5
+                while self.view.busy and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            say(text, tone)
+
+        self.addCleanup(release.set)
+        self.addCleanup(setattr, portly, "stop_many", portly.stop_many)
+        portly.stop_many = slow
+        self.view.say = the_stop_ends_now
+        self.press("k", "y", "down", "k")
+        deadline = time.monotonic() + 2
+        while self.view.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual((self.view.busy, self.view.message), ("", "3000 is free"))
+
     def test_scrolls_to_show_the_header_of_the_selected_group(self):
         lines = portly.group_lines(self.view.groups, 100)
         self.view.selected, self.view.scroll = 20110, 0
