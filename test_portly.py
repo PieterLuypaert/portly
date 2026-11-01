@@ -615,11 +615,16 @@ class FilterTest(unittest.TestCase):
         self.assertEqual(self.in_stacks(["wt10"], rows), [20201])
 
     def test_a_stack_word_finds_a_server_left_in_a_removed_wt_worktree(self):
-        rows = [listener(3000 + index, index, args="node server.js",
-                         cwd=f"/gone/shop/.claude/worktrees/feat-cart-wt{index}/apps/web") for index in (1, 10)]
-        rows.append(listener(3100, 3, args="node server.js", cwd="/gone/herdr/worktrees/fix-kill-wt1-matches-wt10"))
-        self.assertEqual(self.in_stacks(["wt1"], rows), [3001])
-        self.assertEqual(self.in_stacks(["wt10"], rows), [3010])
+        gone = "/gone/shop/.claude/worktrees/feat-cart-wt"
+        rows = [listener(3001, 1, args="node server.js", cwd=gone + "1/apps/web"),
+                listener(3010, 10, args="node server.js", cwd=gone + "10"),
+                listener(3100, 3, args="node server.js", cwd="/gone/herdr/worktrees/fix-kill-wt1-matches-wt10")]
+        with tempfile.TemporaryDirectory() as folder:
+            live = os.path.join(folder, ".claude", "worktrees", "feat-x-wt1")
+            os.makedirs(live)
+            rows.append(listener(3200, 4, args="node server.js", cwd=live))
+            self.assertEqual(self.in_stacks(["wt1"], rows), [3001])
+            self.assertEqual(self.in_stacks(["wt10"], rows), [3010])
 
     def test_any_word_may_match(self):
         self.assertEqual(self.ports(["vite", "symfony"]), [3000, 20110])

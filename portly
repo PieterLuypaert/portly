@@ -790,14 +790,14 @@ WT_FOLDER = re.compile(r"/\.claude/worktrees/[^/]+-(wt\d+)(?:/|$)")
 
 def stack_word(item: Listener) -> str:
     """wt<n> for a port of wt's stack n, known from wt's registry or, once its
-    entry is gone, from the compose project <name>-wt<n> or the worktree folder
-    a server still runs from; else empty."""
+    entry is gone, from the compose project <name>-wt<n> or the removed
+    worktree folder a server still runs from; else empty."""
     if item.stack:
         return f"wt{item.stack.index}"
     if item.container:
         found = re.fullmatch(r".+-(wt\d+)", item.container.project)
     else:
-        found = WT_FOLDER.search(item.cwd)
+        found = WT_FOLDER.search(item.cwd) if is_orphan(item) else None
     return found.group(1) if found else ""
 
 
