@@ -1097,6 +1097,23 @@ class RestartPlanTest(unittest.TestCase):
                 self.assertNotEqual(portly.plan_restart(yours, {}, {})[1], portly.LEAVE_DOCKER)
                 self.assertIn("portly kill 8080", portly.hints_for(yours))
 
+    def test_refuses_lima_under_a_lima_home_of_its_own(self):
+        with tempfile.TemporaryDirectory() as home:
+            instance, sockets = os.path.join(home, "My VMs", "default"), os.path.join(home, "sockets")
+            os.makedirs(instance)
+            os.makedirs(sockets)
+            open(os.path.join(instance, "lima.yaml"), "w").close()
+            for command, args, is_lima in (
+                    ("ssh", f"ssh: {instance}/ssh.sock [mux]", True),
+                    ("ssh", f'/usr/bin/ssh -F /dev/null -o ControlMaster=auto -o ControlPath="{instance}/ssh.sock"'
+                            " -o ControlPersist=yes -p 60022 127.0.0.1", True),
+                    ("qemu-system-aarch64", f"qemu-system-aarch64 -m 4096 -name lima-default"
+                                            f" -pidfile {instance}/qemu.pid", True),
+                    ("ssh", f"ssh: {sockets}/ssh.sock [mux]", False)):
+                with self.subTest(args):
+                    item = listener(8080, 5975, args=args, cwd=HOME_DIR, command=command)
+                    self.assertEqual(portly.is_docker_itself(item), is_lima)
+
     def test_hands_a_wt_server_its_pid_file(self):
         with tempfile.TemporaryDirectory() as folder:
             registry = os.path.join(folder, "shop-worktrees")

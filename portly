@@ -511,17 +511,26 @@ def drop_helpers(rows: List[Listener]) -> List[Listener]:
 # stopping it stops every container all the same.
 DOCKER_ITSELF = re.compile(
     r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|rootlessk.*|OrbStack.*|gvproxy|limactl|vfkit|krunkit")
-# Lima is found on the whole command line: ps joins a program's path and its
+# Others are known by their command line. ps joins a program's path and its
 # arguments with spaces, so /Applications/Rancher Desktop.app/.../limactl has no
-# name to read, and its ssh forwarder (Colima's default) is the ssh master on
-# the control socket of a Lima instance, in ~/.lima, ~/.colima/_lima (or
-# ~/.config/colima/_lima) or rancher-desktop/lima. Lima's QEMU VM, which holds
-# the VM's ssh port, is found by that instance folder too. Any other ssh or
-# QEMU, such as your own ssh -L, is yours to stop.
-LIMA_INSTANCE = r"/(?:\.lima|\.?colima/_lima|rancher-desktop/lima)/[^/]+/"
-LIMA_ITSELF = re.compile(
-    rf"(?:^|/)(?:limactl hostagent |ssh:? .*{LIMA_INSTANCE}ssh\.sock|qemu-system-\S+ .*{LIMA_INSTANCE})")
+# name to read.
+RUNTIME_ARGS = re.compile(r"(?:^|/)limactl hostagent ")
+# Lima's ssh forwarder (Colima's default) is the ssh master on an instance's
+# control socket, and Lima's QEMU VM holds the VM's ssh port: both name the
+# instance folder. That folder is in ~/.lima, ~/.colima/_lima (or
+# ~/.config/colima/_lima) or rancher-desktop/lima, or holds the lima.yaml of an
+# instance under a LIMA_HOME of its own. Any other ssh or QEMU, such as your own
+# ssh -L, is yours to stop.
+LIMA_FOLDER = re.compile(r"^ssh: (.+)/ssh\.sock \[mux\]|(?:^|/)ssh .*ControlPath=\"?(.+?)/ssh\.sock"
+                         r"|(?:^|/)qemu-system-\S+ .*-pidfile (.+?)/qemu\.pid")
+LIMA_HOMES = re.compile(r".*/(?:\.lima|\.?colima/_lima|rancher-desktop/lima)/[^/]+")
 LEAVE_DOCKER = "that is the container runtime itself, not one container: portly leaves it running"
+
+
+def names_lima_instance(args: str) -> bool:
+    match = LIMA_FOLDER.search(args)
+    folder = next(filter(None, match.groups()), "") if match else ""
+    return bool(folder) and bool(LIMA_HOMES.fullmatch(folder) or os.path.isfile(os.path.join(folder, "lima.yaml")))
 
 
 def is_docker_itself(item: Listener) -> bool:
@@ -530,7 +539,7 @@ def is_docker_itself(item: Listener) -> bool:
     words = item.args.split()
     exe = os.path.basename(words[0]) if words else ""
     return not item.container and (any(DOCKER_ITSELF.fullmatch(name) for name in (exe, item.command))
-                                   or bool(LIMA_ITSELF.search(item.args)))
+                                   or bool(RUNTIME_ARGS.search(item.args)) or names_lima_instance(item.args))
 
 
 def is_dev(item: Listener) -> bool:
