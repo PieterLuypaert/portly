@@ -1985,12 +1985,15 @@ def cmd_wait(argv: List[str]) -> int:
         print(f"\r  {paint(ACCENT, frame)} waiting for {paint(BOLD, names)}  {paint(DIM, f'{int(waited)}s')}\033[K",
               end="", flush=True)
 
+    clear = "\r\033[K" if tty else ""
     try:
         ok, waited = wait_for_listen(args.ports, args.timeout, tick if tty else None)
     except KeyboardInterrupt:
         print()
         return 130
-    clear = "\r\033[K" if tty else ""
+    except subprocess.TimeoutExpired:
+        print(clear, end="", flush=True)  # main says which tool hung, without the spinner in front
+        raise
     names = " ".join(map(str, args.ports))
     if not ok:
         print(f"{clear}  {paint(BOLD, names)} not listening after {int(waited)}s.")
@@ -2023,9 +2026,18 @@ COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_r
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv and argv[0] in COMMANDS:
-        return COMMANDS[argv[0]](argv[1:])
-    return cmd_start(argv)
+    # run() reads a missing tool as no output, so without lsof nothing would seem to listen.
+    if not shutil.which("lsof") and not {"-h", "--help"} & set(argv):
+        print("portly needs lsof: install it, or add the folder it is in (often /usr/sbin) to PATH.",
+              file=sys.stderr)
+        return 2
+    try:
+        if argv and argv[0] in COMMANDS:
+            return COMMANDS[argv[0]](argv[1:])
+        return cmd_start(argv)
+    except subprocess.TimeoutExpired as error:  # what listens is unknown then, never empty
+        print(f"portly stopped: {error.cmd[0]} did not answer within {int(error.timeout)}s.", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

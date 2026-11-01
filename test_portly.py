@@ -460,6 +460,119 @@ class StartTest(unittest.TestCase):
             self.assertIs(portly.COMMANDS[dutch], portly.COMMANDS[english], dutch)
 
 
+class Terminal(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class ToolTroubleTest(unittest.TestCase):
+    """Without lsof, or with a tool that does not answer, portly stops with a
+    message that names the tool: never an empty list, never a traceback."""
+
+    def setUp(self):
+        self.addCleanup(setattr, sys, "stdin", sys.stdin)
+        sys.stdin = io.StringIO()  # no terminal: a question gets no answer instead of waiting
+
+    def call(self, *argv, terminal=False):
+        out, err = (Terminal() if terminal else io.StringIO()), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = portly.main(list(argv))
+            except SystemExit as stop:
+                code = stop.code
+        return code, out.getvalue(), err.getvalue()
+
+    def without_lsof(self):
+        empty = tempfile.mkdtemp(prefix="portly-path-")
+        self.addCleanup(os.rmdir, empty)
+        self.addCleanup(os.environ.__setitem__, "PATH", os.environ["PATH"])
+        os.environ["PATH"] = empty
+
+    def test_stops_at_the_start_without_lsof(self):
+        self.without_lsof()
+        port = str(unused_port())
+        for argv in (["list"], [], ["free"], ["wait", port, "-t", "0.3"], ["kill", port], ["open", port]):
+            code, out, err = self.call(*argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertIn("portly needs lsof", err, argv)
+
+    def test_help_needs_no_lsof(self):
+        self.without_lsof()
+        code, out, _ = self.call("-h")
+        self.assertEqual(code, 0)
+        self.assertIn("usage: portly", out)
+        self.assertEqual(self.call("kill", "--help")[0], 0)
+
+    def test_a_hanging_lsof_is_an_error_not_an_empty_list(self):
+        hang(self, "lsof")
+        port = str(unused_port())
+        for argv in (["list"], ["free"], ["wait", port, "-t", "0.3"], ["kill", port]):
+            code, out, err = self.call(*argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertIn("lsof did not answer within 10s", err, argv)
+
+    def list_while_hanging(self, program):
+        """portly list while program hangs, with a port of this test run listening,
+        so the scan reaches ps and git."""
+        hang(self, program)
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            return self.call("list")
+
+    def test_names_a_hanging_ps(self):
+        code, out, err = self.list_while_hanging("ps")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("ps did not answer within 10s", err)
+
+    def test_names_a_hanging_git(self):
+        code, out, err = self.list_while_hanging("git")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("git did not answer within 10s", err)
+
+    def test_kill_does_not_call_a_port_free_when_lsof_hangs_after_the_sigterm(self):
+        folder = tempfile.mkdtemp(prefix="portly-hang-")
+        self.addCleanup(subprocess.run, ["rm", "-rf", folder])
+        with open(os.path.join(folder, "server.py"), "w") as script:
+            script.write(SERVER)
+        port = unused_port()
+        proc = subprocess.Popen([sys.executable, "server.py", str(port)], cwd=folder,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertTrue(portly.wait_for_listen([port], 5)[0])
+        fenced = portly.send
+
+        def send(pid, sig):
+            problem = fenced(pid, sig)
+            hang(self, "lsof")
+            return problem
+
+        self.addCleanup(setattr, portly, "send", fenced)
+        portly.send = send
+        code, out, err = self.call("kill", str(port))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("lsof did not answer within 10s", err)
+
+    def test_wait_clears_its_spinner_before_the_error(self):
+        real, scans = subprocess.run, []
+
+        def run(cmd, *args, **kwargs):
+            if cmd[0] == "lsof":
+                if scans:
+                    raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+                scans.append(cmd)
+            return real(cmd, *args, **kwargs)
+
+        self.addCleanup(setattr, subprocess, "run", real)
+        subprocess.run = run
+        code, out, err = self.call("wait", str(unused_port()), terminal=True)
+        self.assertEqual(code, 2)
+        self.assertIn("waiting for", out)
+        self.assertTrue(out.endswith("\r\033[K"), repr(out))
+        self.assertIn("lsof did not answer within 10s", err)
+
+
 class JsonTest(unittest.TestCase):
     def test_describes_a_worktree_process(self):
         item = listener(20110, 7, args="node server.js", cwd="/t/apps/web",
