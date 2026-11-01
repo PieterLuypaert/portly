@@ -502,18 +502,44 @@ def drop_helpers(rows: List[Listener]) -> List[Listener]:
     return [item for item in rows if item.ppid not in pids]
 
 
-# Docker's own processes publish container ports on the host (Docker Desktop's
-# com.docker.backend, docker-proxy on Linux). When docker does not say which
-# container a port is, such a port looks like a plain process.
-DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*")
-LEAVE_DOCKER = "that is Docker itself, not one container: portly leaves it running"
+# Container runtimes publish container ports on the host from a process of
+# their own: Docker Desktop's com.docker.backend, docker-proxy on Linux,
+# rootless Docker's rootlesskit, OrbStack Helper, Podman machine's gvproxy and
+# Lima's limactl hostagent, which Colima and Rancher Desktop run too. When
+# docker does not say which container a port is, such a port looks like a plain
+# process.
+DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|rootlessk.*|OrbStack.*|gvproxy|limactl")
+# Others are known by their command line. ps joins a program's path and its
+# arguments with spaces, so /Applications/Rancher Desktop.app/.../limactl has no
+# name to read. Podman machine's VM (vfkit, krunkit) listens for its API, and
+# stopping it stops every container all the same; your own vfkit VM has no
+# Podman machine files.
+RUNTIME_ARGS = re.compile(r"(?:^|/)(?:limactl hostagent |(?:vfkit|krunkit) .*/containers/podman/machine/)")
+# Lima's ssh forwarder (Colima's default) is the ssh master on an instance's
+# control socket, and Lima's QEMU VM holds the VM's ssh port: both name the
+# instance folder. That folder is in ~/.lima, ~/.colima/_lima (or
+# ~/.config/colima/_lima) or rancher-desktop/lima, or holds the lima.yaml of an
+# instance under a LIMA_HOME of its own. Any other ssh or QEMU, such as your own
+# ssh -L, is yours to stop.
+LIMA_FOLDER = re.compile(r"^ssh: (.+)/ssh\.sock \[mux\]|(?:^|/)ssh .*ControlPath=\"?(.+?)/ssh\.sock"
+                         r"|(?:^|/)qemu-system-\S+ .*-pidfile (.+?)/qemu\.pid")
+LIMA_HOMES = re.compile(r".*/(?:\.lima|\.?colima/_lima|rancher-desktop/lima)/[^/]+")
+LEAVE_DOCKER = "that is the container runtime itself, not one container: portly leaves it running"
+
+
+def names_lima_instance(args: str) -> bool:
+    match = LIMA_FOLDER.search(args)
+    folder = next(filter(None, match.groups()), "") if match else ""
+    return bool(folder) and bool(LIMA_HOMES.fullmatch(folder) or os.path.isfile(os.path.join(folder, "lima.yaml")))
 
 
 def is_docker_itself(item: Listener) -> bool:
-    """Docker's own process: stopping it stops every container with it."""
+    """A container runtime's own process, such as Docker's: stopping it stops
+    every container with it."""
     words = item.args.split()
     exe = os.path.basename(words[0]) if words else ""
-    return not item.container and any(DOCKER_ITSELF.fullmatch(name) for name in (exe, item.command))
+    return not item.container and (any(DOCKER_ITSELF.fullmatch(name) for name in (exe, item.command))
+                                   or bool(RUNTIME_ARGS.search(item.args)) or names_lima_instance(item.args))
 
 
 def is_dev(item: Listener) -> bool:
