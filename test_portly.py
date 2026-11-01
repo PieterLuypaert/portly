@@ -1017,8 +1017,8 @@ class CommandTest(unittest.TestCase):
         free = unused_port()
         self.assertIn(f"{free} is not listening: there is nothing to restart.", self.call("restart", str(free))[1])
 
-    def test_open_hands_the_url_to_the_browser(self):
-        _, port = self.serve()
+    def browser(self):
+        """What portly hands the browser, caught instead of opened."""
         opened, real = [], subprocess.run
 
         def run(cmd, *args, **kwargs):
@@ -1030,6 +1030,11 @@ class CommandTest(unittest.TestCase):
         subprocess.run = run
         self.addCleanup(setattr, portly, "opener", portly.opener)
         portly.opener = lambda: "browser"
+        return opened
+
+    def test_open_hands_the_url_to_the_browser(self):
+        _, port = self.serve()
+        opened = self.browser()
         code, out, _ = self.call("open", f"{port}/health")
         self.assertEqual(code, 0)
         self.assertEqual(opened, [["browser", f"http://localhost:{port}/health"]])
@@ -1038,6 +1043,19 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(self.call("open", str(free))[:2], (1, f"\n  {free} is not listening.\n\n"))
         self.assertEqual(self.call("open", "home")[0], 2)
         self.assertEqual(len(opened), 1)
+
+    def test_open_takes_the_url_the_live_view_gives(self):
+        database = listener(20116, 9, command="com.docke")
+        database.container = portly.Container("shop-db-1", "postgres", "Up", "shop", "db", "/x", {20116: 5432})
+        rows = [listener(8000, 1, args="symfony server:start -d"), listener(5432, 2, args="postgres"), database]
+        self.addCleanup(setattr, portly, "read_listeners", portly.read_listeners)
+        portly.read_listeners = lambda deep=False: rows
+        opened = self.browser()
+        code, out, _ = self.call("open", "8000/admin", "5432", "20116")
+        self.assertEqual(code, 1)
+        self.assertEqual(opened, [["browser", "https://localhost:8000/admin"]])
+        self.assertEqual(out, "\n  8000 opened: https://localhost:8000/admin\n"
+                              "  5432 speaks no http.\n  20116 speaks no http.\n\n")
 
     def test_logs_follows_the_file_a_server_writes_to(self):
         _, port = self.serve(log=True)
