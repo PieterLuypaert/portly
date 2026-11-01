@@ -498,6 +498,57 @@ class ToolTroubleTest(unittest.TestCase):
         self.assertIn("usage: portly", out)
         self.assertEqual(self.call("kill", "--help")[0], 0)
 
+    def test_a_hanging_lsof_is_an_error_not_an_empty_list(self):
+        hang(self, "lsof")
+        port = str(unused_port())
+        for argv in (["list"], ["free"], ["wait", port, "-t", "0.3"], ["kill", port]):
+            code, out, err = self.call(*argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertIn("lsof did not answer within 10s", err, argv)
+
+    def list_while_hanging(self, program):
+        """portly list while program hangs, with a port of this test run listening,
+        so the scan reaches ps and git."""
+        hang(self, program)
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen()
+            return self.call("list")
+
+    def test_names_a_hanging_ps(self):
+        code, out, err = self.list_while_hanging("ps")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("ps did not answer within 10s", err)
+
+    def test_names_a_hanging_git(self):
+        code, out, err = self.list_while_hanging("git")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("git did not answer within 10s", err)
+
+    def test_kill_does_not_call_a_port_free_when_lsof_hangs_after_the_sigterm(self):
+        folder = tempfile.mkdtemp(prefix="portly-hang-")
+        self.addCleanup(subprocess.run, ["rm", "-rf", folder])
+        with open(os.path.join(folder, "server.py"), "w") as script:
+            script.write(SERVER)
+        port = unused_port()
+        proc = subprocess.Popen([sys.executable, "server.py", str(port)], cwd=folder,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertTrue(portly.wait_for_listen([port], 5)[0])
+        fenced = portly.send
+
+        def send(pid, sig):
+            problem = fenced(pid, sig)
+            hang(self, "lsof")
+            return problem
+
+        self.addCleanup(setattr, portly, "send", fenced)
+        portly.send = send
+        code, out, err = self.call("kill", str(port))
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("lsof did not answer within 10s", err)
+
 
 class JsonTest(unittest.TestCase):
     def test_describes_a_worktree_process(self):

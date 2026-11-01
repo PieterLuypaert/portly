@@ -2022,9 +2022,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("portly needs lsof: install it, or add the folder it is in (often /usr/sbin) to PATH.",
               file=sys.stderr)
         return 2
-    if argv and argv[0] in COMMANDS:
-        return COMMANDS[argv[0]](argv[1:])
-    return cmd_start(argv)
+    try:
+        if argv and argv[0] in COMMANDS:
+            return COMMANDS[argv[0]](argv[1:])
+        return cmd_start(argv)
+    except subprocess.TimeoutExpired as error:  # what listens is unknown then, never empty
+        print(f"portly stopped: {error.cmd[0]} did not answer within {int(error.timeout)}s.", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
