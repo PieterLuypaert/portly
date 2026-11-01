@@ -1302,7 +1302,8 @@ def wait_for_listen(ports: List[int], timeout: float, tick=None) -> Tuple[bool, 
     start = time.monotonic()
     while True:
         waited = time.monotonic() - start
-        waiting = [port for port in ports if port not in listening_ports()]
+        listening = listening_ports()
+        waiting = [port for port in ports if port not in listening]
         if not waiting:
             return True, waited
         if timeout and waited >= timeout:

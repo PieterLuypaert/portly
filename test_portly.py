@@ -1087,6 +1087,22 @@ class FreeAndWaitTest(unittest.TestCase):
             port = probe.getsockname()[1]
         self.assertFalse(portly.wait_for_listen([port], 0.3)[0])
 
+    def test_checks_every_port_against_one_lsof_per_tick(self):
+        snapshots, calls = [set(), {3000}, {3000, 4000, 5000}], []
+
+        def listening_ports():
+            calls.append(1)
+            return snapshots[min(len(calls), len(snapshots)) - 1]
+
+        original = portly.listening_ports
+        portly.listening_ports = listening_ports
+        self.addCleanup(lambda: setattr(portly, "listening_ports", original))
+        ticks = []
+        ok, _ = portly.wait_for_listen([5000, 3000, 4000], 5, tick=lambda waited, waiting: ticks.append(waiting))
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(ticks, [[5000, 3000, 4000], [5000, 4000]])
+
 
 class KillTest(unittest.TestCase):
     def rows(self):
