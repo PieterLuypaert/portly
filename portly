@@ -1931,6 +1931,17 @@ def paint_for_stdout() -> Paint:
     return Paint(sys.stdout.isatty() and "NO_COLOR" not in os.environ)
 
 
+KILL_FLAG = re.compile(r"-[a-z]*k[a-z]*")  # -k, also in a group such as -ak or -ky
+
+
+def split_kill_groups(argv: List[str]) -> List[str]:
+    """-ky as -k -y: the plain parser does not know kill's -y, so it cannot split that group itself."""
+    words = []
+    for word in argv:
+        words += [f"-{letter}" for letter in word[1:]] if KILL_FLAG.fullmatch(word) else [word]
+    return words
+
+
 def cmd_show(argv: List[str]) -> int:
     parser = parser_for("", "Who listens on which port, per project. In a terminal portly opens "
                             "the interactive view; portly list prints.")
@@ -1939,6 +1950,7 @@ def cmd_show(argv: List[str]) -> int:
     parser.add_argument("-a", "--all", action="store_true", help="apps and helper processes too")
     parser.add_argument("-k", "--kill", action="store_true", help="the same as portly kill")
     parser.add_argument("--json", action="store_true", help="as JSON, for scripts")
+    argv = split_kill_groups(argv)
     args, rest = parser.parse_known_args(argv)
     if args.kill:  # the words this parser does not use, -y too, are portly kill's to check, in their order
         kept = set(args.targets + rest)
@@ -1963,7 +1975,7 @@ def interactive() -> bool:
 def cmd_start(argv: List[str]) -> int:
     """Plain portly: the live view in a terminal; a port, --json or a pipe prints."""
     printing = {"-h", "--help", "--json", "--kill"}
-    killing = any(re.fullmatch(r"-[a-z]*k[a-z]*", word) for word in argv)  # -k, also in a group such as -ak
+    killing = any(KILL_FLAG.fullmatch(word) for word in argv)
     if not interactive() or printing & set(argv) or killing or any(word.isdigit() for word in argv):
         return cmd_show(argv)
     return cmd_live(argv)

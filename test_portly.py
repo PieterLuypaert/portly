@@ -476,10 +476,11 @@ class StartTest(unittest.TestCase):
         portly.interactive = lambda: True  # -k stops, also in a terminal
         portly.cmd_kill = lambda args: handed.append(args) or 0
         for argv in (["-k", "shop", "-y"], ["list", "shop", "--kill", "--yes"], ["list", "-ak", "wt1", "-y"],
-                     ["3000", "-k", "8000"], ["-k", "-a", "--json", "wt1"], ["-k", "-y", "3000", "-a", "8000"], ["-k"]):
+                     ["3000", "-k", "8000"], ["-k", "-a", "--json", "wt1"], ["-k", "-y", "3000", "-a", "8000"], ["-k"],
+                     ["-ky", "shop"], ["list", "wt1", "-aky"]):
             portly.main(argv)
         self.assertEqual(handed, [["shop", "-y"], ["shop", "--yes"], ["wt1", "-y"], ["3000", "8000"], ["wt1"],
-                                  ["-y", "3000", "8000"], []])
+                                  ["-y", "3000", "8000"], [], ["-y", "shop"], ["wt1", "-y"]])
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as stop:
             portly.main(["list", "shop", "-y"])
         self.assertEqual(stop.exception.code, 2)
