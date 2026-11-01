@@ -504,17 +504,28 @@ def drop_helpers(rows: List[Listener]) -> List[Listener]:
 
 # Container runtimes publish container ports on the host from a process of
 # their own: Docker Desktop's com.docker.backend, docker-proxy on Linux,
-# OrbStack Helper and Podman machine's gvproxy. When docker does not say which
-# container a port is, such a port looks like a plain process.
-DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|OrbStack.*|gvproxy")
+# OrbStack Helper, Podman machine's gvproxy and Lima's limactl hostagent, which
+# Colima and Rancher Desktop run too. When docker does not say which container
+# a port is, such a port looks like a plain process.
+DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|OrbStack.*|gvproxy|limactl")
+# Lima is found on the whole command line: ps joins a program's path and its
+# arguments with spaces, so /Applications/Rancher Desktop.app/.../limactl has no
+# name to read, and its ssh forwarder (Colima's default) is the ssh master on
+# the control socket of a Lima instance, in ~/.lima, ~/.colima/_lima (or
+# ~/.config/colima/_lima) or rancher-desktop/lima. Any other ssh, such as your
+# own ssh -L, is yours to stop.
+LIMA_ITSELF = re.compile(
+    r"(?:^|/)(?:limactl hostagent |ssh:? .*/(?:\.lima|\.?colima/_lima|rancher-desktop/lima)/[^/]+/ssh\.sock)")
 LEAVE_DOCKER = "that is Docker itself, not one container: portly leaves it running"
 
 
 def is_docker_itself(item: Listener) -> bool:
-    """Docker's own process: stopping it stops every container with it."""
+    """A container runtime's own process, such as Docker's: stopping it stops
+    every container with it."""
     words = item.args.split()
     exe = os.path.basename(words[0]) if words else ""
-    return not item.container and any(DOCKER_ITSELF.fullmatch(name) for name in (exe, item.command))
+    return not item.container and (any(DOCKER_ITSELF.fullmatch(name) for name in (exe, item.command))
+                                   or bool(LIMA_ITSELF.search(item.args)))
 
 
 def is_dev(item: Listener) -> bool:

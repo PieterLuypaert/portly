@@ -971,6 +971,16 @@ RUNTIME_FORWARDERS = {
     "Podman machine": ("gvproxy", "/opt/podman/bin/gvproxy -mtu 1500 -ssh-port 56029 -listen-vfkit"
                        " unixgram:///var/folders/x/T/podman/podman-machine-default-gvproxy.sock"
                        " -pid-file /var/folders/x/T/podman/gvproxy.pid -log-file /var/folders/x/T/podman/gvproxy.log"),
+    "Lima": ("limactl", "/opt/homebrew/bin/limactl hostagent --pidfile /Users/me/.lima/default/ha.pid"
+             " --socket /Users/me/.lima/default/ha.sock default"),
+    "Rancher Desktop": ("limactl", "/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/lima/bin"
+                        "/limactl hostagent --pidfile /Users/me/Library/Application Support/rancher-desktop/lima/0"
+                        "/ha.pid --socket /Users/me/Library/Application Support/rancher-desktop/lima/0/ha.sock 0"),
+    # Lima's ssh forwarder: the ssh master, which retitles itself after its control socket.
+    "Lima over ssh": ("ssh", "ssh: /Users/me/.lima/default/ssh.sock [mux]"),
+    "Colima": ("ssh", "ssh: /Users/me/.colima/_lima/colima/ssh.sock [mux]"),
+    "Colima profile, home in .config": ("ssh", "ssh: /Users/me/.config/colima/_lima/colima-work/ssh.sock [mux]"),
+    "Rancher Desktop over ssh": ("ssh", "ssh: /Users/me/Library/Application Support/rancher-desktop/lima/0/ssh.sock [mux]"),
 }
 
 
@@ -1041,6 +1051,14 @@ class RestartPlanTest(unittest.TestCase):
                 forwarder = listener(8080, 5975, args=args, cwd=HOME_DIR, command=command)
                 self.assertEqual(portly.plan_restart(forwarder, {}, {}), (None, portly.LEAVE_DOCKER))
                 self.assertNotIn("portly kill 8080", portly.hints_for(forwarder))
+
+    def test_leaves_your_own_ssh_tunnel_to_you(self):
+        for args in ("ssh -N -L 8080:localhost:80 me@example.com",
+                     "ssh -i /Users/me/.lima/_config/user -p 60022 -N -L 8080:localhost:80 me@127.0.0.1"):
+            with self.subTest(args):
+                tunnel = listener(8080, 5975, args=args, cwd=HOME_DIR, command="ssh")
+                self.assertNotEqual(portly.plan_restart(tunnel, {}, {})[1], portly.LEAVE_DOCKER)
+                self.assertIn("portly kill 8080", portly.hints_for(tunnel))
 
     def test_hands_a_wt_server_its_pid_file(self):
         with tempfile.TemporaryDirectory() as folder:
