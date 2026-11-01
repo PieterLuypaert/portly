@@ -80,6 +80,15 @@ def hang(test, program):
     test.addCleanup(setattr, subprocess, "run", real)
 
 
+def has_ipv6_loopback():
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
 def listener(port=3000, pid=1, args="", cwd="", ppid=0, place=None, command="node"):
     return portly.Listener(port, pid, command, ppid=ppid, args=args, cwd=cwd, place=place)
 
@@ -698,6 +707,23 @@ class StopTest(unittest.TestCase):
         servers = [self.serve(ignore_term=False) for _ in range(3)]
         rows = [listener(port, proc.pid) for proc, port in servers]
         self.assertEqual(portly.stop_many(rows), {port: None for _, port in servers})
+
+    @unittest.skipUnless(has_ipv6_loopback(), "no IPv6 loopback")
+    def test_leaves_another_server_on_the_port_running(self):
+        stopped, port = self.serve(ignore_term=False)
+        other, _ = self.serve(ignore_term=False, host="::1", port=port)
+        self.assertEqual(portly.stop_many([listener(port, stopped.pid)]), {port: "the port stayed taken"})
+        self.assertEqual(stopped.wait(timeout=5), -15)
+        self.assertIsNone(other.poll())
+
+    def test_kills_the_workers_that_share_the_port_of_their_parent(self):
+        proc, port = self.serve(ignore_term=True, worker=True)
+        self.assertEqual(portly.stop_many([listener(port, proc.pid)]), {port: None})
+        self.assertEqual(proc.wait(timeout=5), -9)
+
+    def test_never_counts_docker_itself_as_part_of_a_server(self):
+        procs = {40: (1, "node server.js"), 41: (40, DOCKER_BACKEND), 42: (40, "php-fpm: pool www")}
+        self.assertEqual(portly.own_pids(listener(8000, 40), procs), [42, 40])
 
     def test_names_a_port_it_may_not_free(self):
         proc, port = self.serve(ignore_term=False)
