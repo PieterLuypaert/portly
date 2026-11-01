@@ -460,6 +460,11 @@ class StartTest(unittest.TestCase):
             self.assertIs(portly.COMMANDS[dutch], portly.COMMANDS[english], dutch)
 
 
+class Terminal(io.StringIO):
+    def isatty(self):
+        return True
+
+
 class ToolTroubleTest(unittest.TestCase):
     """Without lsof, or with a tool that does not answer, portly stops with a
     message that names the tool: never an empty list, never a traceback."""
@@ -468,8 +473,8 @@ class ToolTroubleTest(unittest.TestCase):
         self.addCleanup(setattr, sys, "stdin", sys.stdin)
         sys.stdin = io.StringIO()  # no terminal: a question gets no answer instead of waiting
 
-    def call(self, *argv):
-        out, err = io.StringIO(), io.StringIO()
+    def call(self, *argv, terminal=False):
+        out, err = (Terminal() if terminal else io.StringIO()), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 code = portly.main(list(argv))
@@ -547,6 +552,24 @@ class ToolTroubleTest(unittest.TestCase):
         portly.send = send
         code, out, err = self.call("kill", str(port))
         self.assertEqual((code, out), (2, ""))
+        self.assertIn("lsof did not answer within 10s", err)
+
+    def test_wait_clears_its_spinner_before_the_error(self):
+        real, scans = subprocess.run, []
+
+        def run(cmd, *args, **kwargs):
+            if cmd[0] == "lsof":
+                if scans:
+                    raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+                scans.append(cmd)
+            return real(cmd, *args, **kwargs)
+
+        self.addCleanup(setattr, subprocess, "run", real)
+        subprocess.run = run
+        code, out, err = self.call("wait", str(unused_port()), terminal=True)
+        self.assertEqual(code, 2)
+        self.assertIn("waiting for", out)
+        self.assertTrue(out.endswith("\r\033[K"), repr(out))
         self.assertIn("lsof did not answer within 10s", err)
 
 

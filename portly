@@ -1979,12 +1979,15 @@ def cmd_wait(argv: List[str]) -> int:
         print(f"\r  {paint(ACCENT, frame)} waiting for {paint(BOLD, names)}  {paint(DIM, f'{int(waited)}s')}\033[K",
               end="", flush=True)
 
+    clear = "\r\033[K" if tty else ""
     try:
         ok, waited = wait_for_listen(args.ports, args.timeout, tick if tty else None)
     except KeyboardInterrupt:
         print()
         return 130
-    clear = "\r\033[K" if tty else ""
+    except subprocess.TimeoutExpired:
+        print(clear, end="", flush=True)  # main says which tool hung, without the spinner in front
+        raise
     names = " ".join(map(str, args.ports))
     if not ok:
         print(f"{clear}  {paint(BOLD, names)} not listening after {int(waited)}s.")
