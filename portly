@@ -1913,18 +1913,24 @@ def cmd_open(argv: List[str]) -> int:
     parser = parser_for("open", "Open a port in your browser.")
     parser.add_argument("targets", nargs="+", metavar="port[/path]")
     args = parser.parse_args(argv)
-    paint, taken, code = paint_for_stdout(), listening_ports(), 0
+    paint, code = paint_for_stdout(), 0
+    rows = {item.port: item for item in one_per_port(read_listeners())}
     print()
     for target in args.targets:
         match = re.fullmatch(r"(\d+)(/.*)?", target)
         if not match:
             parser.error(f"not a port: {target}")
         port = port_number(match.group(1))
-        if port not in taken:
+        if port not in rows:
             print(f"  {paint(BOLD, str(port))} is not listening.")
             code = 1
             continue
-        url = f"http://localhost:{port}{match.group(2) or ''}"
+        url = url_of(rows[port])
+        if not url:
+            print(f"  {paint(BOLD, str(port))} speaks no http.")
+            code = 1
+            continue
+        url += match.group(2) or ""
         subprocess.run([opener(), url], check=False)
         print(f"  {paint(BOLD, str(port))} opened: {paint.link(url)}")
     print()
