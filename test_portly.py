@@ -918,6 +918,10 @@ class KillTest(unittest.TestCase):
         targets, free = portly.pick_targets(self.rows(), [3000, 3999], ["fix/cart"])
         self.assertEqual(([item.port for item in targets], free), ([3000, 20110, 20111], [3999]))
 
+    def test_a_stack_word_picks_that_stack_alone(self):
+        targets, free = portly.pick_targets(stack_rows(), [], ["wt1"])
+        self.assertEqual(([item.port for item in targets], free), ([20110, 20111], []))
+
     def kill(self, ports, terms, sure=False, answer=True):
         asked, stopped = [], []
         original = portly.stop_many
