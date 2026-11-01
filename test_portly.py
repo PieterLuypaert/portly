@@ -682,6 +682,22 @@ class GroupTest(unittest.TestCase):
         ])
 
 
+def stack_rows():
+    """A server and a container in stack wt1 and in stack wt10 of shop. The
+    wt10 worktree's branch names wt1, as a branch may."""
+    rows = []
+    for index, branch in ((1, "feat/cart"), (10, "fix/kill-wt1-matches-wt10")):
+        tree = place(branch=branch, is_worktree=True, top=f"/t/{index}")
+        stack = portly.Stack("shop", index, f"/t/{index}", {})
+        server = listener(20100 + 10 * index, index, args="symfony server:start", cwd=HOME_DIR, place=tree)
+        db = listener(20101 + 10 * index, 99, args="/Applications/Docker.app/Contents/MacOS/com.docker.backend",
+                      cwd="/", place=tree)
+        db.container = portly.Container(f"shop-wt{index}-db-1", "mysql", "Up", f"shop-wt{index}", "db", f"/t/{index}")
+        server.stack = db.stack = stack
+        rows += [server, db]
+    return rows
+
+
 class FilterTest(unittest.TestCase):
     def rows(self):
         web = listener(3000, 1, args="node x/node_modules/.bin/vite", cwd=HOME_DIR + "/shop/apps/web",
@@ -700,6 +716,37 @@ class FilterTest(unittest.TestCase):
         self.assertEqual(self.ports(["fix/cart"]), [20110])
         self.assertEqual(self.ports(["VITE"]), [3000])
         self.assertEqual(self.ports(["wt1"]), [20110])
+
+    def in_stacks(self, terms, rows=None):
+        return [item.port for item in portly.visible(rows or stack_rows(), terms, False)]
+
+    def test_a_stack_word_picks_that_stack_alone(self):
+        self.assertEqual(self.in_stacks(["wt1"]), [20110, 20111])
+        self.assertEqual(self.in_stacks(["WT10"]), [20200, 20201])
+        self.assertEqual(self.in_stacks(["wt2"]), [])
+
+    def test_other_words_still_match_inside_a_name(self):
+        self.assertEqual(self.in_stacks(["wt"]), [20110, 20111, 20200, 20201])
+        self.assertEqual(self.in_stacks(["kill-wt1"]), [20200, 20201])
+
+    def test_a_stack_word_finds_the_containers_of_a_stack_wt_no_longer_lists(self):
+        rows = stack_rows()
+        for item in rows:
+            item.stack = None
+        self.assertEqual(self.in_stacks(["wt1"], rows), [20111])
+        self.assertEqual(self.in_stacks(["wt10"], rows), [20201])
+
+    def test_a_stack_word_finds_a_server_left_in_a_removed_wt_worktree(self):
+        gone = "/gone/shop/.claude/worktrees/feat-cart-wt"
+        rows = [listener(3001, 1, args="node server.js", cwd=gone + "1/apps/web"),
+                listener(3010, 10, args="node server.js", cwd=gone + "10"),
+                listener(3100, 3, args="node server.js", cwd="/gone/herdr/worktrees/fix-kill-wt1-matches-wt10")]
+        with tempfile.TemporaryDirectory() as folder:
+            live = os.path.join(folder, ".claude", "worktrees", "feat-x-wt1")
+            os.makedirs(live)
+            rows.append(listener(3200, 4, args="node server.js", cwd=live))
+            self.assertEqual(self.in_stacks(["wt1"], rows), [3001])
+            self.assertEqual(self.in_stacks(["wt10"], rows), [3010])
 
     def test_any_word_may_match(self):
         self.assertEqual(self.ports(["vite", "symfony"]), [3000, 20110])
@@ -1054,6 +1101,10 @@ class KillTest(unittest.TestCase):
     def test_picks_ports_and_every_dev_server_a_word_matches(self):
         targets, free = portly.pick_targets(self.rows(), [3000, 3999], ["fix/cart"])
         self.assertEqual(([item.port for item in targets], free), ([3000, 20110, 20111], [3999]))
+
+    def test_a_stack_word_picks_that_stack_alone(self):
+        targets, free = portly.pick_targets(stack_rows(), [], ["wt1"])
+        self.assertEqual(([item.port for item in targets], free), ([20110, 20111], []))
 
     def kill(self, ports, terms, sure=False, answer=True):
         asked, stopped = [], []
