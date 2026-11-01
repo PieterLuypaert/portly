@@ -660,15 +660,25 @@ class DetailTest(unittest.TestCase):
 
 
 class StopTest(unittest.TestCase):
-    def serve(self, ignore_term):
-        """A throwaway listener on a free port; returns the process and port."""
-        code = (
-            "import signal, socket, sys, time\n"
-            f"if {ignore_term}: signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            "s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
-            "print(s.getsockname()[1], flush=True); time.sleep(60)\n"
-        )
-        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    def serve(self, ignore_term, host="127.0.0.1", port=0, worker=False):
+        """A throwaway listener, on a free port unless one is given; returns
+        the process and port. It runs from node_modules/.bin/vite, so portly
+        names it vite. A worker is a forked child on the same socket, as
+        php-fpm has."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        script = os.path.join(folder.name, "node_modules", ".bin", "vite")
+        os.makedirs(os.path.dirname(script))
+        with open(script, "w") as file:
+            file.write(
+                "import os, signal, socket, time\n"
+                f"if {ignore_term}: signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                f"s = socket.socket(socket.AF_INET6 if ':' in {host!r} else socket.AF_INET)\n"
+                f"s.bind(({host!r}, {port})); s.listen()\n"
+                f"if {worker} and os.fork() == 0: time.sleep(60); os._exit(0)\n"
+                "print(s.getsockname()[1], flush=True); time.sleep(60)\n"
+            )
+        proc = subprocess.Popen([sys.executable, script], stdout=subprocess.PIPE, text=True)
         self.addCleanup(proc.stdout.close)
         self.addCleanup(proc.wait)
         self.addCleanup(proc.kill)
