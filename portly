@@ -784,15 +784,21 @@ def haystack(item: Listener) -> str:
 
 # A filter word that names one wt stack whole: wt1 is not part of wt10.
 STACK_WORD = re.compile(r"wt\d+")
+# The folder wt makes for a worktree by default: .claude/worktrees/<branch>-wt<n>.
+WT_FOLDER = re.compile(r"/\.claude/worktrees/[^/]+-(wt\d+)(?:/|$)")
 
 
 def stack_word(item: Listener) -> str:
     """wt<n> for a port of wt's stack n, known from wt's registry or, once its
-    entry is gone, from the compose project <name>-wt<n>; else empty."""
+    entry is gone, from the compose project <name>-wt<n> or the worktree folder
+    a server still runs from; else empty."""
     if item.stack:
         return f"wt{item.stack.index}"
-    project = re.fullmatch(r".+-(wt\d+)", item.container.project) if item.container else None
-    return project.group(1) if project else ""
+    if item.container:
+        found = re.fullmatch(r".+-(wt\d+)", item.container.project)
+    else:
+        found = WT_FOLDER.search(item.cwd)
+    return found.group(1) if found else ""
 
 
 def matches(item: Listener, terms: List[str]) -> bool:

@@ -614,6 +614,13 @@ class FilterTest(unittest.TestCase):
         self.assertEqual(self.in_stacks(["wt1"], rows), [20111])
         self.assertEqual(self.in_stacks(["wt10"], rows), [20201])
 
+    def test_a_stack_word_finds_a_server_left_in_a_removed_wt_worktree(self):
+        rows = [listener(3000 + index, index, args="node server.js",
+                         cwd=f"/gone/shop/.claude/worktrees/feat-cart-wt{index}/apps/web") for index in (1, 10)]
+        rows.append(listener(3100, 3, args="node server.js", cwd="/gone/herdr/worktrees/fix-kill-wt1-matches-wt10"))
+        self.assertEqual(self.in_stacks(["wt1"], rows), [3001])
+        self.assertEqual(self.in_stacks(["wt10"], rows), [3010])
+
     def test_any_word_may_match(self):
         self.assertEqual(self.ports(["vite", "symfony"]), [3000, 20110])
 
