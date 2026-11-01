@@ -1017,8 +1017,8 @@ class CommandTest(unittest.TestCase):
         free = unused_port()
         self.assertIn(f"{free} is not listening: there is nothing to restart.", self.call("restart", str(free))[1])
 
-    def test_open_hands_the_url_to_the_browser(self):
-        _, port = self.serve()
+    def browser(self):
+        """What portly hands the browser, caught instead of opened."""
         opened, real = [], subprocess.run
 
         def run(cmd, *args, **kwargs):
@@ -1030,6 +1030,11 @@ class CommandTest(unittest.TestCase):
         subprocess.run = run
         self.addCleanup(setattr, portly, "opener", portly.opener)
         portly.opener = lambda: "browser"
+        return opened
+
+    def test_open_hands_the_url_to_the_browser(self):
+        _, port = self.serve()
+        opened = self.browser()
         code, out, _ = self.call("open", f"{port}/health")
         self.assertEqual(code, 0)
         self.assertEqual(opened, [["browser", f"http://localhost:{port}/health"]])
