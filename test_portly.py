@@ -464,6 +464,21 @@ class StartTest(unittest.TestCase):
         self.assertEqual(self.start([], terminal=False), "show")
         self.assertEqual(portly.COMMANDS["list"].__name__, "cmd_show")
 
+    def test_the_kill_flag_hands_the_rest_to_kill(self):
+        handed = []
+        self.addCleanup(setattr, portly, "interactive", portly.interactive)
+        self.addCleanup(setattr, portly, "cmd_kill", portly.cmd_kill)
+        portly.interactive = lambda: True  # -k stops, also in a terminal
+        portly.cmd_kill = lambda args: handed.append(args) or 0
+        for argv in (["-k", "shop", "-y"], ["list", "shop", "--kill", "--yes"], ["list", "-ak", "wt1", "-y"],
+                     ["3000", "-k", "8000"], ["-k", "-a", "--json", "wt1"], ["-k"]):
+            portly.main(argv)
+        self.assertEqual(handed, [["shop", "-y"], ["shop", "--yes"], ["wt1", "-y"], ["3000", "8000"], ["wt1"], []])
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as stop:
+            portly.main(["list", "shop", "-y"])
+        self.assertEqual(stop.exception.code, 2)
+        self.assertIn("unrecognized arguments: -y", err.getvalue())
+
     def test_keeps_the_dutch_command_names(self):
         for dutch, english in {"lijst": "list", "herstart": "restart", "vrij": "free", "wacht": "wait"}.items():
             self.assertIs(portly.COMMANDS[dutch], portly.COMMANDS[english], dutch)
