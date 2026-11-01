@@ -1227,6 +1227,15 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(self.call("kill", self.word, "-y")[0], 0)
         self.assertEqual(portly.listening_pids(port), [])
 
+    def test_the_kill_flag_asks_like_kill_and_takes_yes(self):
+        _, port = self.serve()
+        code, _, err = self.call("-k", self.word)
+        self.assertEqual(code, 2)
+        self.assertIn("add -y", err)
+        self.assertNotEqual(portly.listening_pids(port), [])
+        self.assertEqual(self.call("-k", self.word, "-y")[0], 0)
+        self.assertEqual(portly.listening_pids(port), [])
+
     def test_restart_brings_a_port_back_under_a_new_pid(self):
         proc, port = self.serve(log=True)
         self.addCleanup(lambda: [portly.send(pid, portly.signal.SIGKILL) for pid in portly.listening_pids(port)])

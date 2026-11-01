@@ -1939,10 +1939,12 @@ def cmd_show(argv: List[str]) -> int:
     parser.add_argument("-a", "--all", action="store_true", help="apps and helper processes too")
     parser.add_argument("-k", "--kill", action="store_true", help="the same as portly kill")
     parser.add_argument("--json", action="store_true", help="as JSON, for scripts")
-    args = parser.parse_args(argv)
+    args, rest = parser.parse_known_args(argv)
+    if args.kill:  # -y and whatever else this parser does not know are portly kill's to check
+        return cmd_kill(args.targets + rest)
+    if rest:
+        parser.error(f"unrecognized arguments: {' '.join(rest)}")
     ports, terms = targets_of(parser, args.targets)
-    if args.kill:
-        return cmd_kill(args.targets)
     rows = one_per_port(read_listeners(deep=bool(ports)))
     if args.json:
         chosen = [item for item in rows if item.port in ports] if ports else visible(rows, terms, args.all)
