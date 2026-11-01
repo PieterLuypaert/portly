@@ -507,14 +507,14 @@ def drop_helpers(rows: List[Listener]) -> List[Listener]:
 # rootless Docker's rootlesskit, OrbStack Helper, Podman machine's gvproxy and
 # Lima's limactl hostagent, which Colima and Rancher Desktop run too. When
 # docker does not say which container a port is, such a port looks like a plain
-# process. Podman machine's VM (vfkit, krunkit) listens too, for its API:
-# stopping it stops every container all the same.
-DOCKER_ITSELF = re.compile(
-    r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|rootlessk.*|OrbStack.*|gvproxy|limactl|vfkit|krunkit")
+# process.
+DOCKER_ITSELF = re.compile(r"com\.docke.*|dockerd|docker-proxy|vpnkit.*|rootlessk.*|OrbStack.*|gvproxy|limactl")
 # Others are known by their command line. ps joins a program's path and its
 # arguments with spaces, so /Applications/Rancher Desktop.app/.../limactl has no
-# name to read.
-RUNTIME_ARGS = re.compile(r"(?:^|/)limactl hostagent ")
+# name to read. Podman machine's VM (vfkit, krunkit) listens for its API, and
+# stopping it stops every container all the same; your own vfkit VM has no
+# Podman machine files.
+RUNTIME_ARGS = re.compile(r"(?:^|/)(?:limactl hostagent |(?:vfkit|krunkit) .*/containers/podman/machine/)")
 # Lima's ssh forwarder (Colima's default) is the ssh master on an instance's
 # control socket, and Lima's QEMU VM holds the VM's ssh port: both name the
 # instance folder. That folder is in ~/.lima, ~/.colima/_lima (or

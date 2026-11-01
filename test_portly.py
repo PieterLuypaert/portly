@@ -1091,7 +1091,10 @@ class RestartPlanTest(unittest.TestCase):
                               ("ssh", "ssh -i /Users/me/.lima/_config/user -p 60022 -N -L 8080:localhost:80"
                                       " me@127.0.0.1"),
                               ("qemu-system-x86_64", "qemu-system-x86_64 -m 2048 -hda /Users/me/vms/debian.qcow2"
-                                                     " -netdev user,id=n0,hostfwd=tcp::2222-:22")):
+                                                     " -netdev user,id=n0,hostfwd=tcp::2222-:22"),
+                              ("vfkit", "vfkit --cpus 2 --memory 2048 --bootloader efi,variable-store="
+                                        "/Users/me/vms/efi-vars,create --device virtio-blk,path=/Users/me/vms"
+                                        "/fedora.raw --restful-uri tcp://localhost:8081")):
             with self.subTest(args):
                 yours = listener(8080, 5975, args=args, cwd=HOME_DIR, command=command)
                 self.assertNotEqual(portly.plan_restart(yours, {}, {})[1], portly.LEAVE_DOCKER)
