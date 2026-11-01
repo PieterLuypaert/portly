@@ -986,11 +986,16 @@ RUNTIME_FORWARDERS = {
                        " -pid-file /var/folders/x/T/podman/gvproxy.pid -log-file /var/folders/x/T/podman/gvproxy.log"),
     "Lima": ("limactl", "/opt/homebrew/bin/limactl hostagent --pidfile /Users/me/.lima/default/ha.pid"
              " --socket /Users/me/.lima/default/ha.sock default"),
+    "Lima with debug logging": ("limactl", "/opt/homebrew/bin/limactl --debug hostagent --pidfile"
+                                " /Users/me/.lima/default/ha.pid --socket /Users/me/.lima/default/ha.sock default"),
     "Rancher Desktop": ("limactl", "/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/lima/bin"
                         "/limactl hostagent --pidfile /Users/me/Library/Application Support/rancher-desktop/lima/0"
                         "/ha.pid --socket /Users/me/Library/Application Support/rancher-desktop/lima/0/ha.sock 0"),
     # Lima's ssh forwarder: the ssh master, which retitles itself after its control socket.
     "Lima over ssh": ("ssh", "ssh: /Users/me/.lima/default/ssh.sock [mux]"),
+    "Lima over ssh, not retitled": ("ssh", '/usr/bin/ssh -F /dev/null -o IdentityFile="/Users/me/.lima/_config/user"'
+                                    ' -o ControlMaster=auto -o ControlPath="/Users/me/.lima/default/ssh.sock"'
+                                    " -o ControlPersist=yes -p 60022 127.0.0.1"),
     "Colima": ("ssh", "ssh: /Users/me/.colima/_lima/colima/ssh.sock [mux]"),
     "Colima profile, home in .config": ("ssh", "ssh: /Users/me/.config/colima/_lima/colima-work/ssh.sock [mux]"),
     "Rancher Desktop over ssh": ("ssh", "ssh: /Users/me/Library/Application Support/rancher-desktop/lima/0/ssh.sock [mux]"),
