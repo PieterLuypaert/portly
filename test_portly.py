@@ -1009,6 +1009,12 @@ RUNTIME_FORWARDERS = {
     "Podman machine VM on libkrun": ("krunkit", "/opt/podman/bin/krunkit --cpus 6 --memory 2048 --device virtio-blk,"
                                      "path=/Users/me/.local/share/containers/podman/machine/libkrun"
                                      "/podman-machine-default-arm64.raw --restful-uri tcp://localhost:50090"),
+    # Not a forwarder: Lima's QEMU VM, on the port it forwards to the VM's ssh.
+    "Colima on QEMU": ("qemu-system-aarch64", "/opt/homebrew/bin/qemu-system-aarch64 -m 4096 -cpu host"
+                       " -machine virt,accel=hvf -netdev user,id=net0,net=192.168.5.0/24,dhcpstart=192.168.5.15,"
+                       "hostfwd=tcp:127.0.0.1:60022-:22 -chardev socket,id=char-qmp,"
+                       "path=/Users/me/.colima/_lima/colima/qmp.sock,server=on,wait=off -qmp chardev:char-qmp"
+                       " -name lima-colima -pidfile /Users/me/.colima/_lima/colima/qemu.pid"),
 }
 
 
@@ -1080,13 +1086,16 @@ class RestartPlanTest(unittest.TestCase):
                 self.assertEqual(portly.plan_restart(forwarder, {}, {}), (None, portly.LEAVE_DOCKER))
                 self.assertNotIn("portly kill 8080", portly.hints_for(forwarder))
 
-    def test_leaves_your_own_ssh_tunnel_to_you(self):
-        for args in ("ssh -N -L 8080:localhost:80 me@example.com",
-                     "ssh -i /Users/me/.lima/_config/user -p 60022 -N -L 8080:localhost:80 me@127.0.0.1"):
+    def test_leaves_your_own_tunnel_or_vm_to_you(self):
+        for command, args in (("ssh", "ssh -N -L 8080:localhost:80 me@example.com"),
+                              ("ssh", "ssh -i /Users/me/.lima/_config/user -p 60022 -N -L 8080:localhost:80"
+                                      " me@127.0.0.1"),
+                              ("qemu-system-x86_64", "qemu-system-x86_64 -m 2048 -hda /Users/me/vms/debian.qcow2"
+                                                     " -netdev user,id=n0,hostfwd=tcp::2222-:22")):
             with self.subTest(args):
-                tunnel = listener(8080, 5975, args=args, cwd=HOME_DIR, command="ssh")
-                self.assertNotEqual(portly.plan_restart(tunnel, {}, {})[1], portly.LEAVE_DOCKER)
-                self.assertIn("portly kill 8080", portly.hints_for(tunnel))
+                yours = listener(8080, 5975, args=args, cwd=HOME_DIR, command=command)
+                self.assertNotEqual(portly.plan_restart(yours, {}, {})[1], portly.LEAVE_DOCKER)
+                self.assertIn("portly kill 8080", portly.hints_for(yours))
 
     def test_hands_a_wt_server_its_pid_file(self):
         with tempfile.TemporaryDirectory() as folder:

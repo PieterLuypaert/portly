@@ -515,10 +515,12 @@ DOCKER_ITSELF = re.compile(
 # arguments with spaces, so /Applications/Rancher Desktop.app/.../limactl has no
 # name to read, and its ssh forwarder (Colima's default) is the ssh master on
 # the control socket of a Lima instance, in ~/.lima, ~/.colima/_lima (or
-# ~/.config/colima/_lima) or rancher-desktop/lima. Any other ssh, such as your
-# own ssh -L, is yours to stop.
+# ~/.config/colima/_lima) or rancher-desktop/lima. Lima's QEMU VM, which holds
+# the VM's ssh port, is found by that instance folder too. Any other ssh or
+# QEMU, such as your own ssh -L, is yours to stop.
+LIMA_INSTANCE = r"/(?:\.lima|\.?colima/_lima|rancher-desktop/lima)/[^/]+/"
 LIMA_ITSELF = re.compile(
-    r"(?:^|/)(?:limactl hostagent |ssh:? .*/(?:\.lima|\.?colima/_lima|rancher-desktop/lima)/[^/]+/ssh\.sock)")
+    rf"(?:^|/)(?:limactl hostagent |ssh:? .*{LIMA_INSTANCE}ssh\.sock|qemu-system-\S+ .*{LIMA_INSTANCE})")
 LEAVE_DOCKER = "that is the container runtime itself, not one container: portly leaves it running"
 
 
