@@ -1213,6 +1213,15 @@ class TerminalTest(unittest.TestCase):
         plan, _ = portly.plan_restart(item, {41418: (1, args)}, {})
         self.assertEqual(plan.terminal, "")
 
+    def test_names_the_machine_a_loopback_port_is_reachable_from(self):
+        item = listener(3000, 41418, args="node server.js", cwd=HOME_DIR)
+        item.addresses = ["127.0.0.1"]
+        self.addCleanup(setattr, sys, "platform", sys.platform)
+        for platform, reach in (("darwin", "this Mac only"), ("linux", "this computer only")):
+            sys.platform = platform
+            fields = {key: value for key, value, *_ in portly.detail_fields(item)}
+            self.assertEqual(fields["reach"], reach, platform)
+
 
 class RestartPlanTest(unittest.TestCase):
     def test_finds_the_command_that_started_a_server(self):

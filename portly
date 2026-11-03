@@ -980,7 +980,8 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
         add("also", what, note=" ".join(other.addresses))
     if item.addresses:
         if is_local_only(item):
-            add("reach", "this Mac only", note=" ".join(item.addresses))
+            add("reach", "this Mac only" if sys.platform == "darwin" else "this computer only",
+                note=" ".join(item.addresses))
         else:
             add("reach", "your network too", WORKTREE, " ".join(item.addresses))
     if item.connections >= 0:
