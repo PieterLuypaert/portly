@@ -195,14 +195,15 @@ REGISTRY_FIELDS = {"branch", "path", "ports", "db", "pr", "here"}
 def read_stacks(common: str) -> List[Stack]:
     """wt's registry next to a git dir: one <common>/<name>-worktrees/<n>.env
     per worktree, with REG_PATH and its ports: REG_PORTS=web=20110 api=20111,
-    or a REG_<ROLE> line per port from older wt engines."""
+    or a REG_<ROLE> line per port from older wt engines. A byte that is no
+    UTF-8, such as in a branch name, becomes �, as in run()."""
     stacks = []
     for entry in sorted(glob.glob(os.path.join(common, "*-worktrees", "*.env"))):
         index = os.path.basename(entry)[: -len(".env")]
         if not index.isdecimal():
             continue
         values = {}
-        with open(entry) as lines:
+        with open(entry, encoding="utf-8", errors="replace") as lines:
             for line in lines:
                 key, sep, value = line.strip().partition("=")
                 if sep and key.startswith("REG_"):
