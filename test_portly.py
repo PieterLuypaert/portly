@@ -1306,6 +1306,20 @@ class RestartPlanTest(unittest.TestCase):
         plan, _ = portly.plan_restart(listener(3000, 41418, args=args, cwd=HOME_DIR), {41418: (1, args)}, {})
         self.assertEqual(plan.env, {})
 
+    def test_says_which_environment_variables_a_restart_keeps(self):
+        item = listener(3000, 41418, args="node server.js", cwd=HOME_DIR, place=place())
+        item.restart = portly.Restart(["node", "server.js"], HOME_DIR, [41418], os.path.join(HOME_DIR, "x.log"))
+        item.connections = 0
+        for env, said in (({}, "environment variables are not kept"),
+                          ({"WT_INDEX": "1"}, "only wt's environment variables are kept")):
+            item.restart.env = env
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                portly.restart([item], [], ["shop"], False, portly.Paint(False), ask=lambda question: False)
+            self.assertIn(said, out.getvalue())
+            fields = {key: note for key, _, _, note in portly.detail_fields(item)}
+            self.assertEqual(fields["restart"], said)
+            self.assertEqual(portly.as_json(item)["restart"]["env"], env)
+
     def test_starts_a_server_with_the_variables_of_its_plan_alone(self):
         self.addCleanup(os.environ.pop, "WT_PORT_API", None)
         os.environ["WT_PORT_API"] = "20121"  # from the worktree portly itself runs in
