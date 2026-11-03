@@ -471,8 +471,8 @@ def read_listeners(deep: bool = False) -> List[Listener]:
         containers = parse_docker(run(["docker", "ps", "--format", DOCKER_FORMAT]))
     except subprocess.TimeoutExpired:
         containers = {}
+    add_containers(listeners, containers)
     for item in listeners:
-        item.container = containers.get(item.port)
         if item.container:
             item.place, item.stack = lookup.container_home(item.container)
         elif item.place:
@@ -480,6 +480,17 @@ def read_listeners(deep: bool = False) -> List[Listener]:
     if deep:
         add_deep_info(listeners)
     return listeners
+
+
+def add_containers(listeners: List[Listener], containers: Dict[int, Container]) -> None:
+    """Give each listener the container whose port it listens on. Beside a
+    server of its own on that port, such as a local Postgres on 127.0.0.1:5432
+    next to a Postgres container on *:5432, only the runtime's listener is the
+    container's."""
+    runtime_ports = {item.port for item in listeners if is_runtime(item)}
+    for item in listeners:
+        if item.port not in runtime_ports or is_runtime(item):
+            item.container = containers.get(item.port)
 
 
 def one_per_port(listeners: List[Listener]) -> List[Listener]:

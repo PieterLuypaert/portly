@@ -896,6 +896,19 @@ class DockerTest(unittest.TestCase):
     def test_skips_lines_it_cannot_read(self):
         self.assertEqual(portly.parse_docker("Cannot connect to the Docker daemon"), {})
 
+    def test_gives_a_container_only_to_its_runtime_beside_a_local_server(self):
+        db = portly.Container("shop-db-1", "postgres:16", "Up 2 hours", "shop", "db", "/x/shop")
+        backend = listener(5432, 300, ppid=1, args=DOCKER_BACKEND, command="com.docke")
+        postgres = listener(5432, 900, ppid=1, args="postgres -D /opt/homebrew/var/postgresql@16", command="postgres")
+        portly.add_containers([postgres, backend], {5432: db})
+        self.assertEqual((backend.container, postgres.container), (db, None))
+
+    def test_gives_a_container_to_the_one_listener_on_its_port(self):
+        db = portly.Container("shop-db-1", "postgres:16", "Up 2 hours", "shop", "db", "/x/shop")
+        forwarder = listener(5432, 300, ppid=1, args="/opt/some/new-runtime forward", command="new-runti")
+        portly.add_containers([forwarder], {5432: db})
+        self.assertEqual(forwarder.container, db)
+
     def test_shows_the_other_server_on_a_containers_port(self):
         item = listener(5432, 300, args=DOCKER_BACKEND)
         item.container = portly.Container("shop-db-1", "postgres:16", "Up 2 hours", "shop", "db", "/x/shop")
