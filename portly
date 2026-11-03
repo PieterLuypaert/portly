@@ -1418,6 +1418,16 @@ def opener() -> str:
     return "open" if sys.platform == "darwin" else "xdg-open"
 
 
+def open_in_browser(url: str) -> Optional[str]:
+    """Hand url to the system's opener; why that failed, or None. A server,
+    WSL or a container may have no xdg-open at all."""
+    try:
+        done = subprocess.run([opener(), url], check=False)
+    except OSError:
+        return f"no browser opener found ({opener()})"
+    return f"{opener()} could not open it" if done.returncode else None
+
+
 def port_number(text: str) -> int:
     if not text.isdigit() or not 0 < int(text) < 65536:
         raise argparse.ArgumentTypeError(f"not a port: {text}")
@@ -1727,7 +1737,11 @@ class LiveView:
         if not url:
             self.say("no url for this port", DIM)
             return
-        subprocess.Popen([opener(), url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.Popen([opener(), url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            self.say(f"no browser opener found ({opener()})", GONE)
+            return
         self.say(f"opened: {url}", FREE)
 
     def copy_selected(self) -> None:
@@ -2138,7 +2152,11 @@ def cmd_open(argv: List[str]) -> int:
             code = 1
             continue
         url += match.group(2) or ""
-        subprocess.run([opener(), url], check=False)
+        problem = open_in_browser(url)
+        if problem:
+            print(f"  {paint(BOLD, str(port))} {paint(GONE, problem)}: {paint.link(url)}")
+            code = 1
+            continue
         print(f"  {paint(BOLD, str(port))} opened: {paint.link(url)}")
     print()
     return code

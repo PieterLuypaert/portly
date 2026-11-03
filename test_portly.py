@@ -216,6 +216,12 @@ class LiveViewTest(unittest.TestCase):
         for key in keys:
             self.assertTrue(self.view.handle(key))
 
+    def test_says_when_no_browser_opener_is_found(self):
+        self.addCleanup(setattr, portly, "opener", portly.opener)
+        portly.opener = lambda: "/nonexistent/xdg-open"
+        self.press("o")
+        self.assertEqual(self.view.message, "no browser opener found (/nonexistent/xdg-open)")
+
     def test_starts_on_the_first_port_and_moves_with_the_arrows(self):
         self.assertEqual(self.view.selected, 3000)
         self.press("down", "down")
@@ -1594,7 +1600,8 @@ class CommandTest(unittest.TestCase):
 
         def run(cmd, *args, **kwargs):
             if cmd[0] == "browser":
-                return opened.append(cmd)
+                opened.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0)
             return real(cmd, *args, **kwargs)
 
         self.addCleanup(setattr, subprocess, "run", real)
@@ -1614,6 +1621,17 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(self.call("open", str(free))[:2], (1, f"\n  {free} is not listening.\n\n"))
         self.assertEqual(self.call("open", "home")[0], 2)
         self.assertEqual(len(opened), 1)
+
+    def test_open_says_when_the_browser_opener_is_missing_or_fails(self):
+        _, port = self.serve()
+        self.addCleanup(setattr, portly, "opener", portly.opener)
+        for opener, said in (("/nonexistent/xdg-open", "no browser opener found (/nonexistent/xdg-open)"),
+                             ("false", "false could not open it")):
+            portly.opener = lambda opener=opener: opener
+            code, out, _ = self.call("open", str(port))
+            self.assertEqual(code, 1, opener)
+            self.assertIn(f"{port} {said}: http://localhost:{port}", out)
+            self.assertNotIn("opened", out)
 
     def test_open_takes_the_url_the_live_view_gives(self):
         database = listener(20116, 9, command="com.docke")
