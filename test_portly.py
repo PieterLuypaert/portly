@@ -1194,6 +1194,20 @@ PROCS = {
 }
 
 
+class TerminalTest(unittest.TestCase):
+    def test_knows_no_terminal_on_macos_and_linux(self):
+        for tty, has in (("??", False), ("?", False), ("", False), ("s003", True), ("pts/2", True)):
+            self.assertEqual(portly.has_terminal(tty), has, tty)
+
+    def test_a_background_process_on_linux_did_not_run_in_a_terminal(self):
+        args = f"{sys.executable} -m http.server 3000"
+        item = listener(3000, 41418, args=args, cwd=HOME_DIR)
+        item.tty = "?"
+        self.assertEqual(portly.output_of(item), "no terminal or log file")
+        plan, _ = portly.plan_restart(item, {41418: (1, args)}, {})
+        self.assertEqual(plan.terminal, "")
+
+
 class RestartPlanTest(unittest.TestCase):
     def test_finds_the_command_that_started_a_server(self):
         self.assertEqual(portly.launcher_of(40997, PROCS), 40983)

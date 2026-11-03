@@ -110,7 +110,7 @@ class Listener:
     container: Optional[Container] = None
     stack: Optional[Stack] = None
     addresses: List[str] = field(default_factory=list)  # bound to, such as 127.0.0.1 or *
-    tty: str = ""  # ps tty, ?? without a terminal
+    tty: str = ""  # ps tty: ?? on macOS and ? on Linux without a terminal
     rss_kb: int = 0
     cpu: str = ""
     others: List["Listener"] = field(default_factory=list)  # other servers on this port, beside this row
@@ -385,6 +385,11 @@ def descendants(pid: int, procs: Dict[int, Tuple[int, str]]) -> List[int]:
     return found
 
 
+def has_terminal(tty: str) -> bool:
+    """Whether ps's tty is a terminal: without one ps shows ?? on macOS and ? on Linux."""
+    return tty not in ("", "?", "??")
+
+
 def restart_argv(args: str, cwd: str) -> Optional[List[str]]:
     """The command to run again, or None when it cannot be found any more. A
     package manager runs through PATH: the folder it ran from, such as the bin
@@ -446,7 +451,7 @@ def plan_restart(item: Listener, procs: Dict[int, Tuple[int, str]],
         candidate = os.path.join(item.stack.registry, f"{item.stack.index}-{item.stack.role_of(item.port)}.pid")
         pidfile = candidate if os.path.exists(candidate) else ""
     # Output already going to a file means it ran in the background anyway.
-    terminal = item.tty if item.tty not in ("", "??") and not item.stdout else ""
+    terminal = item.tty if has_terminal(item.tty) and not item.stdout else ""
     env = wt_env(item.stack, item.place) if item.stack and item.place else {}
     return Restart(argv, cwd, [launcher] + descendants(launcher, procs), item.stdout or default_log(item),
                    pidfile, terminal, env), ""
@@ -930,7 +935,7 @@ def output_of(item: Listener) -> str:
     """Where a process's output goes."""
     if item.log:
         return tilde(item.log)
-    if item.tty and item.tty != "??":
+    if has_terminal(item.tty):
         return f"terminal {item.tty}"
     return "no terminal or log file"
 
