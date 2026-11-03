@@ -1703,6 +1703,14 @@ class PlaceTest(unittest.TestCase):
         self.assertEqual(stacks, [portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111},
                                                os.path.realpath(registry), "shop_wt1")])
 
+    def test_reads_a_registry_entry_with_a_byte_that_is_no_utf8(self):
+        registry = os.path.join(self.repo, ".git", "shop-worktrees")
+        os.makedirs(registry)
+        with open(os.path.join(registry, "1.env"), "wb") as entry:
+            entry.write(b"REG_BRANCH=fix/caf\xe9\nREG_PATH=" + self.tree.encode() + b"\nREG_PORTS=web=20110\n")
+        stacks = portly.read_stacks(os.path.realpath(os.path.join(self.repo, ".git")))
+        self.assertEqual([(stack.path, stack.ports) for stack in stacks], [(self.tree, {"web": 20110})])
+
     def test_reads_no_port_from_a_wt_field_or_a_number_int_cannot_read(self):
         registry = os.path.join(self.repo, ".git", "shop-worktrees")
         os.makedirs(registry)
