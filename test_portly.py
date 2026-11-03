@@ -1288,6 +1288,50 @@ class RestartPlanTest(unittest.TestCase):
         self.assertEqual((plan.pids, plan.pidfile, plan.log),
                          ([41377, 41418], os.path.join(registry, "1-web.pid"), item.stdout))
 
+    def test_hands_a_wt_server_the_variables_wt_started_it_with(self):
+        args = f"{sys.executable} -m http.server 20110"
+        item = listener(20110, 41418, args=args, cwd=HOME_DIR,
+                        place=place(branch="fix/cart", is_worktree=True, top="/x/shop-wt1"))
+        item.place.common = "/x/shop/.git"
+        item.stack = portly.Stack("shop", 1, "/x/shop-wt1", {"web": 20110, "api": 20111, "mail-dev": 20112},
+                                  "/x/shop/.git/shop-worktrees", "shop_wt1")
+        plan, _ = portly.plan_restart(item, {41418: (1, args)}, {})
+        self.assertEqual(plan.env, {"WT_PROJECT": "shop", "WT_INDEX": "1", "WT_PORT_WEB": "20110",
+                                    "WT_PORT_API": "20111", "WT_PORT_MAIL_DEV": "20112",
+                                    "WT_REPO_ROOT": "/x/shop-wt1", "WT_DB_NAME": "shop_wt1",
+                                    "WT_PRIMARY_ROOT": "/x/shop"})
+
+    def test_hands_a_server_outside_wt_no_variables(self):
+        args = f"{sys.executable} -m http.server 3000"
+        plan, _ = portly.plan_restart(listener(3000, 41418, args=args, cwd=HOME_DIR), {41418: (1, args)}, {})
+        self.assertEqual(plan.env, {})
+
+    def test_says_which_environment_variables_a_restart_keeps(self):
+        item = listener(3000, 41418, args="node server.js", cwd=HOME_DIR, place=place())
+        item.restart = portly.Restart(["node", "server.js"], HOME_DIR, [41418], os.path.join(HOME_DIR, "x.log"))
+        item.connections = 0
+        for env, said in (({}, "environment variables are not kept"),
+                          ({"WT_INDEX": "1"}, "only wt's environment variables are kept")):
+            item.restart.env = env
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                portly.restart([item], [], ["shop"], False, portly.Paint(False), ask=lambda question: False)
+            self.assertIn(said, out.getvalue())
+            fields = {key: note for key, _, _, note in portly.detail_fields(item)}
+            self.assertEqual(fields["restart"], said)
+            self.assertEqual(portly.as_json(item)["restart"]["env"], env)
+
+    def test_starts_a_server_with_the_variables_of_its_plan_alone(self):
+        self.addCleanup(os.environ.pop, "WT_PORT_API", None)
+        os.environ["WT_PORT_API"] = "20121"  # from the worktree portly itself runs in
+        with tempfile.TemporaryDirectory() as folder:
+            script = ("import os; open('seen', 'w').write(' '.join(os.environ.get(key, '-')"
+                      " for key in ('WT_PORT_WEB', 'WT_PORT_API', 'HOME')))")
+            plan = portly.Restart([sys.executable, "-c", script], folder, [], os.path.join(folder, "out.log"),
+                                  env={"WT_PORT_WEB": "20110"})
+            os.waitpid(portly.start(plan), 0)
+            with open(os.path.join(folder, "seen")) as seen:
+                self.assertEqual(seen.read(), f"20110 - {os.environ['HOME']}")
+
 
 SERVER = """import socket, sys, time
 s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1646,7 +1690,8 @@ class PlaceTest(unittest.TestCase):
         self.write_registry()
         stacks = portly.read_stacks(os.path.realpath(os.path.join(self.repo, ".git")))
         registry = os.path.realpath(os.path.join(self.repo, ".git", "shop-worktrees"))
-        self.assertEqual(stacks, [portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111}, registry)])
+        self.assertEqual(stacks, [portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111}, registry,
+                                               "shop_wt1")])
 
     def test_reads_the_wt_registry_with_every_port_on_one_line(self):
         registry = os.path.join(self.repo, ".git", "shop-worktrees")
@@ -1656,7 +1701,7 @@ class PlaceTest(unittest.TestCase):
                         "REG_DB=shop_wt1\nREG_PR=42\nREG_HERE=1\n")
         stacks = portly.read_stacks(os.path.realpath(os.path.join(self.repo, ".git")))
         self.assertEqual(stacks, [portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111},
-                                               os.path.realpath(registry))])
+                                               os.path.realpath(registry), "shop_wt1")])
 
     def test_reads_no_port_from_a_wt_field_or_a_number_int_cannot_read(self):
         registry = os.path.join(self.repo, ".git", "shop-worktrees")
