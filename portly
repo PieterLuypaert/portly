@@ -68,6 +68,7 @@ class Stack:
     path: str  # the worktree
     ports: Dict[str, int]  # role (web, api, gcs, ...) to port
     registry: str = ""  # the folder with wt's entries, pid files and logs
+    db: str = ""  # the worktree's database, "" without one
 
     def role_of(self, port: int) -> str:
         return next((role for role, value in self.ports.items() if value == port), "")
@@ -82,6 +83,7 @@ class Restart:
     log: str  # the new output is appended here
     pidfile: str = ""  # wt's pid file for this server: it gets the new pid, so wt down still finds it
     terminal: str = ""  # the tty it ran in; after the restart it runs in the background
+    env: Dict[str, str] = field(default_factory=dict)  # set on top of portly's own environment
 
 
 @dataclass
@@ -158,6 +160,11 @@ def parse_lsof(text: str) -> List[Listener]:
     return list(found.values())
 
 
+def main_checkout(common: str) -> str:
+    """The main checkout of a git common dir: the folder that holds .git."""
+    return os.path.dirname(common) if os.path.basename(common) == ".git" else common
+
+
 def place_of(cwd: str) -> Optional[Place]:
     if not cwd or cwd == "/":
         return None
@@ -168,7 +175,7 @@ def place_of(cwd: str) -> Optional[Place]:
     if len(out) != 3:
         return None
     top, common, branch = os.path.realpath(out[0]), os.path.realpath(out[1]), out[2]
-    main = os.path.dirname(common) if os.path.basename(common) == ".git" else common
+    main = main_checkout(common)
     sub = os.path.relpath(os.path.realpath(cwd), top)
     repo = os.path.basename(main)
     return Place(
@@ -207,7 +214,8 @@ def read_stacks(common: str) -> List[Stack]:
             ports = {role: int(value) for role, value in values.items()
                      if value.isdecimal() and role not in REGISTRY_FIELDS}
         name = os.path.basename(os.path.dirname(entry))[: -len("-worktrees")]
-        stacks.append(Stack(name, int(index), values.get("path", ""), ports, os.path.dirname(entry)))
+        stacks.append(Stack(name, int(index), values.get("path", ""), ports, os.path.dirname(entry),
+                            values.get("db", "")))
     return stacks
 
 
@@ -398,6 +406,17 @@ def default_log(item: Listener) -> str:
     return os.path.join(HOME, ".cache", "portly", f"{name}-{item.port}.log")
 
 
+def wt_env(stack: Stack, place: Place) -> Dict[str, str]:
+    """The variables of its worktree that wt hands every dev server it starts,
+    rebuilt from its registry entry: without them a worktree's server comes
+    back on the main checkout's ports or database. What wt reads from its
+    config, such as WT_PRODUCT_BASE, is not in the registry."""
+    env = {"WT_PROJECT": stack.name, "WT_INDEX": str(stack.index), "WT_REPO_ROOT": stack.path,
+           "WT_DB_NAME": stack.db, "WT_PRIMARY_ROOT": main_checkout(place.common)}
+    env.update((f"WT_PORT_{role.upper().replace('-', '_')}", str(port)) for role, port in stack.ports.items())
+    return env
+
+
 def plan_restart(item: Listener, procs: Dict[int, Tuple[int, str]],
                  cwds: Dict[int, str]) -> Tuple[Optional[Restart], str]:
     """How to restart a process, or why that cannot be done."""
@@ -421,8 +440,9 @@ def plan_restart(item: Listener, procs: Dict[int, Tuple[int, str]],
         pidfile = candidate if os.path.exists(candidate) else ""
     # Output already going to a file means it ran in the background anyway.
     terminal = item.tty if item.tty not in ("", "??") and not item.stdout else ""
+    env = wt_env(item.stack, item.place) if item.stack and item.place else {}
     return Restart(argv, cwd, [launcher] + descendants(launcher, procs), item.stdout or default_log(item),
-                   pidfile, terminal), ""
+                   pidfile, terminal, env), ""
 
 
 def add_restart_plans(listeners: List[Listener]) -> None:
@@ -1154,7 +1174,10 @@ def start(plan: Restart) -> int:
     with open(plan.log, "a") as log:
         log.write(f"\n── portly restart {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
         log.flush()
-        process = subprocess.Popen(plan.argv, cwd=plan.cwd, stdin=subprocess.DEVNULL, stdout=log,
+        # wt's variables in portly's own shell belong to the worktree portly runs in, not to this server.
+        env = {key: value for key, value in os.environ.items() if not key.startswith("WT_")}
+        env.update(plan.env)
+        process = subprocess.Popen(plan.argv, cwd=plan.cwd, env=env, stdin=subprocess.DEVNULL, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True)
     if plan.pidfile:
         with open(plan.pidfile, "w") as pidfile:
