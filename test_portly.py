@@ -1390,6 +1390,27 @@ class RestartTest(unittest.TestCase):
                                  if _started_by_this_run(pid)])
         return folder, port, first
 
+    def serve_beside(self, port):
+        """Another server on the same port, on [::1], with a worker on its
+        socket as php-fpm has; the worker ends with its parent. The server's
+        process and the pids that listen."""
+        script = ("import os, socket, sys, time\n"
+                  "s = socket.socket(socket.AF_INET6); s.bind(('::1', int(sys.argv[1]))); s.listen()\n"
+                  "parent = os.getpid()\n"
+                  "if os.fork() == 0:\n"
+                  "    while os.getppid() == parent: time.sleep(0.1)\n"
+                  "    os._exit(0)\n"
+                  "time.sleep(120)")
+        other = subprocess.Popen([sys.executable, "-c", script, str(port)])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        deadline = time.monotonic() + 5
+        while len(set(portly.listening_pids(port)) - {other.pid}) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        listening = set(portly.listening_pids(port))
+        self.assertIn(other.pid, listening)
+        return other, listening
+
     def test_restarts_a_server_with_its_own_command(self):
         folder, port, first = self.serve()
         item = next(row for row in portly.one_per_port(portly.read_listeners(deep=True)) if row.port == port)
@@ -1399,6 +1420,30 @@ class RestartTest(unittest.TestCase):
         self.assertTrue(new and first.pid not in new)
         with open(os.path.join(folder, "out.log")) as output:
             self.assertIn("── portly restart", output.read())
+
+    @unittest.skipUnless(has_ipv6_loopback(), "no IPv6 loopback")
+    def test_restarts_a_server_beside_another_on_its_port(self):
+        _, port, first = self.serve()
+        other, listening = self.serve_beside(port)
+        beside = listening - {first.pid}
+        self.assertEqual(len(beside), 2)  # the other server and its worker
+        [item] = [item for item in portly.read_listeners(deep=True) if item.pid == first.pid]
+        self.assertEqual(portly.restart_many([item], timeout=10), {port: None})
+        self.assertIsNone(other.poll())
+        new = set(portly.listening_pids(port)) - beside
+        self.assertTrue(new and first.pid not in new)
+        self.assertLessEqual(beside, set(portly.listening_pids(port)))
+
+    @unittest.skipUnless(has_ipv6_loopback(), "no IPv6 loopback")
+    def test_a_restart_that_never_listens_fails_beside_another_server(self):
+        folder, port, first = self.serve()
+        other, _ = self.serve_beside(port)
+        log = os.path.join(folder, "out.log")
+        item = portly.Listener(port, first.pid, "Python", cwd=folder)
+        item.restart = portly.Restart([sys.executable, "-c", "pass"], folder, [first.pid], log)
+        self.assertEqual(portly.restart_many([item], timeout=1),
+                         {port: f"not listening after 1s, see {portly.tilde(log)}"})
+        self.assertIsNone(other.poll())
 
 
 class FreeAndWaitTest(unittest.TestCase):
@@ -1436,7 +1481,7 @@ class FreeAndWaitTest(unittest.TestCase):
     def test_checks_every_port_against_one_lsof_per_tick(self):
         snapshots, calls = [set(), {3000}, {3000, 4000, 5000}], []
 
-        def listening_ports():
+        def listening_ports(besides=None):
             calls.append(1)
             return snapshots[min(len(calls), len(snapshots)) - 1]
 
