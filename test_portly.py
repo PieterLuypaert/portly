@@ -1369,7 +1369,10 @@ s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(); print("listening", flush=Tr
 
 
 class RestartTest(unittest.TestCase):
-    def test_restarts_a_server_with_its_own_command(self):
+    def serve(self):
+        """SERVER on 127.0.0.1 in a folder of its own, its output in out.log;
+        the folder, the port and the process. What a restart starts on that
+        port is stopped at the end."""
         folder = tempfile.mkdtemp()
         self.addCleanup(subprocess.run, ["rm", "-rf", folder])
         with open(os.path.join(folder, "server.py"), "w") as script:
@@ -1383,11 +1386,16 @@ class RestartTest(unittest.TestCase):
         self.addCleanup(first.wait)
         self.addCleanup(first.kill)  # cleanups run last first: kill, then wait
         self.assertTrue(portly.wait_for_listen([port], 5)[0])
+        self.addCleanup(lambda: [portly.send(pid, portly.signal.SIGKILL) for pid in portly.listening_pids(port)
+                                 if _started_by_this_run(pid)])
+        return folder, port, first
+
+    def test_restarts_a_server_with_its_own_command(self):
+        folder, port, first = self.serve()
         item = next(row for row in portly.one_per_port(portly.read_listeners(deep=True)) if row.port == port)
         self.assertIsNotNone(item.restart, item.restart_problem)
         self.assertEqual(portly.restart_many([item], timeout=10), {port: None})
         new = portly.listening_pids(port)
-        self.addCleanup(lambda: [portly.send(pid, portly.signal.SIGKILL) for pid in portly.listening_pids(port)])
         self.assertTrue(new and first.pid not in new)
         with open(os.path.join(folder, "out.log")) as output:
             self.assertIn("── portly restart", output.read())
