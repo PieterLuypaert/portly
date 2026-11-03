@@ -111,6 +111,7 @@ class Listener:
     tty: str = ""  # ps tty, ?? without a terminal
     rss_kb: int = 0
     cpu: str = ""
+    others: List["Listener"] = field(default_factory=list)  # other servers on this port, beside this row
     # Only read for the detail views (deep=True):
     parent: str = ""  # short command line of the parent
     log: str = ""  # the file its output goes to: stdout, or an open .log
@@ -482,16 +483,23 @@ def read_listeners(deep: bool = False) -> List[Listener]:
 
 
 def one_per_port(listeners: List[Listener]) -> List[Listener]:
-    """One process per port, sorted by port. When workers share the port with
-    their parent (php-fpm), the parent stands for them."""
+    """One row per port, sorted by port. When workers share the port with
+    their parent (php-fpm), the parent stands for them. Another server on the
+    port, such as a local Postgres beside a Postgres container, goes in the
+    row's others; the row is a container before a dev server before an app,
+    so a shared port keeps its place in the list. A runtime that publishes a
+    port with a process per address, as docker-proxy does on Linux, is one
+    server."""
     by_port = {}
     for item in listeners:
         by_port.setdefault(item.port, []).append(item)
     kept = []
     for _, group in sorted(by_port.items()):
         pids = {item.pid for item in group}
-        roots = [item for item in group if item.ppid not in pids]
-        kept.append(min(roots or group, key=lambda item: item.pid))
+        roots = [item for item in group if item.ppid not in pids] or group
+        row = min(roots, key=lambda item: (item.container is None, not is_dev(item), item.pid))
+        row.others = [item for item in roots if item is not row and not (is_runtime(item) and is_runtime(row))]
+        kept.append(row)
     return kept
 
 
@@ -533,13 +541,19 @@ def names_lima_instance(args: str) -> bool:
     return bool(folder) and bool(LIMA_HOMES.fullmatch(folder) or os.path.isfile(os.path.join(folder, "lima.yaml")))
 
 
+def is_runtime(item: Listener) -> bool:
+    """A container runtime's process by its command, also one that publishes
+    a container's port."""
+    words = item.args.split()
+    exe = os.path.basename(words[0]) if words else ""
+    return (any(DOCKER_ITSELF.fullmatch(name) for name in (exe, item.command))
+            or bool(RUNTIME_ARGS.search(item.args)) or names_lima_instance(item.args))
+
+
 def is_docker_itself(item: Listener) -> bool:
     """A container runtime's own process, such as Docker's: stopping it stops
     every container with it."""
-    words = item.args.split()
-    exe = os.path.basename(words[0]) if words else ""
-    return not item.container and (any(DOCKER_ITSELF.fullmatch(name) for name in (exe, item.command))
-                                   or bool(RUNTIME_ARGS.search(item.args)) or names_lima_instance(item.args))
+    return not item.container and is_runtime(item)
 
 
 def is_dev(item: Listener) -> bool:
@@ -753,6 +767,17 @@ def header_segments(group: Group, width: int) -> List[Segment]:
     return segments
 
 
+def pid_text(item: Listener) -> str:
+    """The pid column: pid 123, and +1 process when another server shares the port.
+    Docker's own pid says nothing about the container."""
+    parts = [] if item.container else [f"pid {item.pid}"]
+    if item.others:
+        containers = all(other.container for other in item.others)
+        kind = ("container", "containers") if containers else ("process", "processes")
+        parts.append("+" + plural(len(item.others), *kind))
+    return "  ".join(parts)
+
+
 def group_lines(groups: List[Group], width: int) -> List[Line]:
     """Every line of the grouped list: a header per group, a row per port and
     a blank line between groups. Columns line up across groups."""
@@ -763,8 +788,7 @@ def group_lines(groups: List[Group], width: int) -> List[Line]:
     wheres = {item.port: where(item) for item in rows}
     images = {item.port: item.container.image if item.container else "" for item in rows}
     ages = {item.port: age_of(item) for item in rows}
-    # Docker's own pid says nothing about the container.
-    pids = {item.port: "" if item.container else f"pid {item.pid}" for item in rows}
+    pids = {item.port: pid_text(item) for item in rows}
     port_w = max(len(str(item.port)) for item in rows)
     age_w, pid_w = (max(map(len, col.values())) for col in (ages, pids))
     widths = [max(map(len, col.values())) for col in (whats, wheres, images)]
@@ -908,6 +932,9 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
         if item.rss_kb:
             add("memory", f"{round(item.rss_kb / 1024)} MB", note=f"cpu {item.cpu}%")
         add("output", output_of(item))
+    for other in item.others:
+        what = f"container {other.container.name}" if other.container else f"pid {other.pid} ({label(other)})"
+        add("also", what, note=" ".join(other.addresses))
     if item.addresses:
         if is_local_only(item):
             add("reach", "this Mac only", note=" ".join(item.addresses))
@@ -1045,7 +1072,7 @@ def taken_by(holders: List[Listener], procs: Dict[int, Tuple[int, str]]) -> str:
 def stop_many(rows: List[Listener]) -> Dict[int, Optional[str]]:
     """Free the ports of rows: one docker stop for the containers, SIGTERM for
     the processes and after five seconds SIGKILL for those that still listen on
-    their port. Another process on that port was never shown, so it is left
+    their port. Another server on that port, one of the row's others, is left
     running. Per port None once free, else the reason it is still taken,
     which names what still listens on it."""
     problems: Dict[int, str] = {}
@@ -1372,6 +1399,7 @@ def as_json(item: Listener) -> dict:
         "folder_gone": is_orphan(item),
         "running_seconds": None if container else etime_seconds(item.elapsed),
         "memory_kb": None if container else item.rss_kb,
+        "others": [as_json(other) for other in item.others],
     }
     if item.connections >= 0:
         plan = item.restart

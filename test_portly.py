@@ -704,7 +704,39 @@ class OnePerPortTest(unittest.TestCase):
     def test_keeps_the_parent_of_workers_on_one_port(self):
         rows = [listener(51443, 61035, ppid=13848), listener(51443, 13848, ppid=13826),
                 listener(51443, 65207, ppid=13848)]
-        self.assertEqual([item.pid for item in portly.one_per_port(rows)], [13848])
+        [row] = portly.one_per_port(rows)
+        self.assertEqual((row.pid, row.others), (13848, []))
+
+    def test_keeps_another_server_on_the_port_beside_the_row(self):
+        backend = listener(5432, 900, ppid=1, args=DOCKER_BACKEND, command="com.docke")
+        backend.container = portly.Container("shop-db-1", "postgres:16", "Up 2 hours", "shop", "db", "/x/shop")
+        postgres = listener(5432, 300, ppid=1, args="postgres -D /opt/homebrew/var/postgresql@16", cwd="/",
+                            command="postgres")
+        [row] = portly.one_per_port([postgres, backend])
+        self.assertEqual((row.pid, [item.pid for item in row.others]), (900, [300]))
+
+    def test_a_dev_server_is_the_row_before_an_app(self):
+        app = listener(5173, 300, ppid=1, args="/Applications/Some.app/Contents/MacOS/Some", cwd="/")
+        vite = listener(5173, 900, ppid=1, args="node /x/node_modules/.bin/vite", cwd="/x/shop")
+        [row] = portly.one_per_port([app, vite])
+        self.assertEqual((row.pid, [item.pid for item in row.others]), (900, [300]))
+
+    def test_a_local_server_given_a_container_by_port_stays_apart(self):
+        db = portly.Container("shop-db-1", "postgres:16", "Up 2 hours", "shop", "db", "/x/shop")
+        forwarder = listener(5432, 300, ppid=1, args="/opt/some/new-runtime forward", command="new-runti")
+        postgres = listener(5432, 900, ppid=1, args="postgres -D /opt/homebrew/var/postgresql@16", command="postgres")
+        forwarder.container = postgres.container = db
+        [row] = portly.one_per_port([forwarder, postgres])
+        self.assertEqual([item.pid for item in row.others], [900])
+
+    def test_a_runtime_with_a_process_per_address_is_one_server(self):
+        db = portly.Container("shop-db-1", "postgres:16", "Up 2 hours", "shop", "db", "/x/shop")
+        proxies = [listener(5432, pid, ppid=1, args=f"/usr/bin/docker-proxy -host-ip {ip} -host-port 5432",
+                            command="docker-pr") for pid, ip in ((300, "0.0.0.0"), (301, "::"))]
+        for item in proxies:
+            item.container = db
+        [row] = portly.one_per_port(proxies)
+        self.assertEqual(row.others, [])
 
     def test_sorts_by_port(self):
         rows = [listener(8000, 2), listener(3000, 1)]
@@ -864,6 +896,21 @@ class DockerTest(unittest.TestCase):
     def test_skips_lines_it_cannot_read(self):
         self.assertEqual(portly.parse_docker("Cannot connect to the Docker daemon"), {})
 
+    def test_shows_the_other_server_on_a_containers_port(self):
+        item = listener(5432, 300, args=DOCKER_BACKEND)
+        item.container = portly.Container("shop-db-1", "postgres:16", "Up 2 hours", "shop", "db", "/x/shop")
+        other = listener(5432, 900, args="postgres -D /opt/homebrew/var/postgresql@16", command="postgres")
+        other.addresses = ["127.0.0.1"]
+        item.others = [other]
+        lines = portly.render_groups(portly.group_rows([item]), portly.Paint(False), 120)
+        self.assertEqual(lines[1].split()[-2:], ["+1", "process"])
+        other.container = portly.Container("blog-db-1", "postgres:16", "Up 1 hour", "blog", "db", "/x/blog")
+        self.assertEqual(portly.pid_text(item), "+1 container")
+        other.container = None
+        details = [" ".join(line.split()) for line in portly.render_detail(item, portly.Paint(False))]
+        self.assertIn("also pid 900 (postgres) 127.0.0.1", details)
+        self.assertEqual([data["pid"] for data in portly.as_json(item)["others"]], [900])
+
     def test_a_hanging_lsof_is_not_taken_for_free_ports(self):
         hang(self, "lsof")
         with self.assertRaises(subprocess.TimeoutExpired):
@@ -963,6 +1010,13 @@ class StopTest(unittest.TestCase):
                          {port: f"pid {other.pid} (vite) listens on it"})
         self.assertEqual(stopped.wait(timeout=5), -15)
         self.assertIsNone(other.poll())
+
+    @unittest.skipUnless(has_ipv6_loopback(), "no IPv6 loopback")
+    def test_lists_the_other_server_on_the_port_beside_the_row(self):
+        first, port = self.serve(ignore_term=False)
+        second, _ = self.serve(ignore_term=False, host="::1", port=port)
+        [row] = [item for item in portly.one_per_port(portly.read_listeners()) if item.port == port]
+        self.assertEqual(sorted([row.pid] + [item.pid for item in row.others]), sorted([first.pid, second.pid]))
 
     def test_kills_the_workers_that_share_the_port_of_their_parent(self):
         proc, port = self.serve(ignore_term=True, worker=True)
@@ -1420,7 +1474,7 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((data["port"], data["pid"], data["cwd"]), (port, proc.pid, os.path.realpath(self.folder)))
         self.assertEqual(sorted(data), sorted([
             "port", "name", "url", "addresses", "local_only", "project", "stack", "container", "pid",
-            "command", "cwd", "folder_gone", "running_seconds", "memory_kb",
+            "command", "cwd", "folder_gone", "running_seconds", "memory_kb", "others",
             "log", "parent", "connections", "restart", "restart_problem"]))
 
     def test_kill_frees_a_port_and_knows_a_free_one(self):
