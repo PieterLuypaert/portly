@@ -41,7 +41,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 HOME = os.path.expanduser("~")
 
@@ -1025,19 +1025,22 @@ def render_detail(item: Listener, paint: Paint, rows: Optional[List[Listener]] =
 LSOF_LISTEN = ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]
 
 
-def listening_ports() -> set:
-    return {item.port for item in parse_lsof(run(LSOF_LISTEN))}
+def listening_ports(besides: Optional[Dict[int, Set[int]]] = None) -> set:
+    """The ports something listens on. besides gives per port the pids that do
+    not count, such as another server beside the one that is restarting."""
+    besides = besides or {}
+    return {item.port for item in parse_lsof(run(LSOF_LISTEN)) if item.pid not in besides.get(item.port, ())}
 
 
 def listening_pids(port: int) -> List[int]:
     return [int(pid) for pid in run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"]).split()]
 
 
-def wait_for_ports(ports: List[int], seconds: float) -> set:
-    """Wait until none of ports listens; the ones still taken when time is up."""
+def wait_for_ports(ports: List[int], seconds: float, besides: Optional[Dict[int, Set[int]]] = None) -> set:
+    """Wait until none of ports listens, but for besides; the ones still taken when time is up."""
     deadline = time.monotonic() + seconds
     while True:
-        busy = set(ports) & listening_ports()
+        busy = set(ports) & listening_ports(besides)
         if not busy or time.monotonic() > deadline:
             return busy
         time.sleep(0.1)
@@ -1165,20 +1168,20 @@ def is_alive(pid: int) -> bool:
     return True
 
 
-def stop_tree(pids: List[int], ports: List[int]) -> Optional[str]:
+def stop_tree(pids: List[int], ports: List[int], besides: Optional[Dict[int, Set[int]]] = None) -> Optional[str]:
     """SIGTERM a launcher and everything under it; after five seconds SIGKILL
-    what is left. A reason when the ports stay taken."""
+    what is left. A reason when the ports stay taken by anything but besides."""
     for pid in pids:
         problem = send(pid, signal.SIGTERM)
         if problem:
             return problem
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and (any(map(is_alive, pids)) or set(ports) & listening_ports()):
+    while time.monotonic() < deadline and (any(map(is_alive, pids)) or set(ports) & listening_ports(besides)):
         time.sleep(0.1)
     for pid in pids:
         if is_alive(pid):
             send(pid, signal.SIGKILL)
-    return "the port stayed taken" if wait_for_ports(ports, 2) else None
+    return "the port stayed taken" if wait_for_ports(ports, 2, besides) else None
 
 
 def start(plan: Restart) -> int:
@@ -1220,9 +1223,10 @@ def restart_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optiona
             results[item.port] = item.restart_problem or "no restart plan"
             continue
         plans.setdefault(item.restart.pids[0], (item.restart, []))[1].append(item)
+    besides = others_on_ports([pid for plan, _ in plans.values() for pid in plan.pids])
     for plan, items in plans.values():
         ports = [item.port for item in items]
-        problem = stop_tree(plan.pids, ports)
+        problem = stop_tree(plan.pids, ports, besides)
         if not problem:
             try:
                 start(plan)
@@ -1232,13 +1236,21 @@ def restart_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optiona
             results.update((port, problem) for port in ports)
     waiting = [item.port for item in rows if item.port not in results]
     if waiting:
-        wait_for_listen(waiting, timeout)
-        taken = listening_ports()
+        wait_for_listen(waiting, timeout, besides=besides)
+        taken = listening_ports(besides)
         logs = {item.port: item.restart.log for item in rows if item.restart}
         for port in waiting:
             late = f"not listening after {int(timeout)}s" + (f", see {tilde(logs[port])}" if port in logs else "")
             results[port] = None if port in taken else late
     return results
+
+
+def others_on_ports(pids: List[int]) -> Dict[int, Set[int]]:
+    """Per port what listens on it now outside pids, such as a second server
+    on [::1] with its workers: it keeps running through a restart of pids, and
+    does not count as the port listening again."""
+    return {port: {item.pid for item in items if item.pid not in pids}
+            for port, items in listeners_by_port().items()}
 
 
 def restart_summary(item: Listener, rows: List[Listener]) -> str:
@@ -1399,13 +1411,14 @@ def free_ports(start: int, count: int, taken: set) -> List[int]:
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
-def wait_for_listen(ports: List[int], timeout: float, tick=None) -> Tuple[bool, float]:
-    """Wait until every port listens; whether they did, and after how long.
-    A timeout of 0 waits for ever. tick(seconds, waiting) runs on every check."""
+def wait_for_listen(ports: List[int], timeout: float, tick=None,
+                    besides: Optional[Dict[int, Set[int]]] = None) -> Tuple[bool, float]:
+    """Wait until every port listens, but for besides; whether they did, and after
+    how long. A timeout of 0 waits for ever. tick(seconds, waiting) runs on every check."""
     start = time.monotonic()
     while True:
         waited = time.monotonic() - start
-        listening = listening_ports()
+        listening = listening_ports(besides)
         waiting = [port for port in ports if port not in listening]
         if not waiting:
             return True, waited
