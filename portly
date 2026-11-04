@@ -900,8 +900,18 @@ def note_of(item: Listener) -> List[Segment]:
     return notes
 
 
-# From this width on a row has every column; narrower, only port, name, status and age.
-FULL_ROW = 80
+# A row has every column from this much room on: an 80-column window, whose
+# last column the live view leaves empty. Narrower, a row keeps port, name,
+# status and age, and its note while that fits.
+FULL_ROW = 79
+
+
+@dataclass
+class Columns:
+    """What the rows of one list share: the port and age widths that line them up, and each row's age."""
+    port_w: int
+    age_w: int
+    ages: Dict[int, str]
 
 
 def group_lines(groups: List[Group], width: int) -> List[Line]:
@@ -910,8 +920,10 @@ def group_lines(groups: List[Group], width: int) -> List[Line]:
     rows = [item for group in groups for item in group.rows]
     if not rows:
         return []
+    ages = {id(item): age_of(item) for item in rows}
+    columns = Columns(max(len(str(item.port)) for item in rows), max(map(len, ages.values())), ages)
+    row_segments = (full_rows if width >= FULL_ROW else narrow_rows)(rows, width, columns)
     lines: List[Line] = []
-    row_segments = full_rows(rows, width) if width >= FULL_ROW else narrow_rows(rows, width)
     for group in groups:
         if lines:
             lines.append((None, None, []))
@@ -920,49 +932,44 @@ def group_lines(groups: List[Group], width: int) -> List[Line]:
     return lines
 
 
-def port_segments(item: Listener, port_w: int) -> List[Segment]:
-    return [("    ", ""), (str(item.port).rjust(port_w), DIM if item.is_down else BOLD)]
+def port_segments(item: Listener, columns: Columns) -> List[Segment]:
+    return [("    ", ""), (str(item.port).rjust(columns.port_w), DIM if item.is_down else BOLD)]
 
 
-def status_segments(item: Listener, age_w: int) -> List[Segment]:
-    return [("  ", ""), status_of(item), ("  ", ""), (age_of(item).rjust(age_w), DIM)]
+def row_end(item: Listener, columns: Columns, width: int, segments: List[Segment]) -> List[Segment]:
+    """segments, then status, age and each note that fits."""
+    segments = segments + [("  ", ""), status_of(item), ("  ", ""), (columns.ages[id(item)].rjust(columns.age_w), DIM)]
+    for text, tone in note_of(item):
+        room = width - sum(len(piece) for piece, _ in segments) - 2
+        if room >= min(len(text), 4):
+            segments += [("  ", ""), (clip(text, room), tone)]
+    return segments
 
 
-def full_rows(rows: List[Listener], width: int) -> Dict[int, List[Segment]]:
+def full_rows(rows: List[Listener], width: int, columns: Columns) -> Dict[int, List[Segment]]:
     """Per row: port, role, tool, status, age and the note, which gets what is left."""
     roles = {id(item): role_of(item) for item in rows}
     tools = {id(item): tool_of(item) for item in rows}
-    port_w = max(len(str(item.port)) for item in rows)
-    age_w = max(len(age_of(item)) for item in rows)
     widths = [max(map(len, col.values())) for col in (roles, tools)]
     gaps = 2 * sum(1 for w in widths if w)
-    role_w, tool_w = fit(widths, [min(w, 8) for w in widths], width - 4 - port_w - gaps - 5 - age_w)
+    role_w, tool_w = fit(widths, [min(w, 8) for w in widths], width - 4 - columns.port_w - gaps - 5 - columns.age_w)
     lines = {}
     for item in rows:
-        segments = port_segments(item, port_w)
-        tone = DIM if item.is_down else ""
+        segments = port_segments(item, columns)
         if role_w:
-            segments += [("  ", ""), (clip(roles[id(item)], role_w).ljust(role_w), tone)]
+            segments += [("  ", ""), (clip(roles[id(item)], role_w).ljust(role_w), DIM if item.is_down else "")]
         if tool_w:
             segments += [("  ", ""), (clip(tools[id(item)], tool_w).ljust(tool_w), DIM)]
-        segments += status_segments(item, age_w)
-        for text, note_tone in note_of(item):
-            room = width - sum(len(piece) for piece, _ in segments) - 2
-            if room >= min(len(text), 4):
-                segments += [("  ", ""), (clip(text, room), note_tone)]
-        lines[id(item)] = segments
+        lines[id(item)] = row_end(item, columns, width, segments)
     return lines
 
 
-def narrow_rows(rows: List[Listener], width: int) -> Dict[int, List[Segment]]:
-    """Per row: port, its role or else its tool, status and age."""
+def narrow_rows(rows: List[Listener], width: int, columns: Columns) -> Dict[int, List[Segment]]:
+    """Per row: port, its role or else its tool, status, age, and the note while it fits."""
     names = {id(item): role_of(item) or tool_of(item) for item in rows}
-    port_w = max(len(str(item.port)) for item in rows)
-    age_w = max(len(age_of(item)) for item in rows)
-    name_w = max(1, min(max(map(len, names.values())), width - 4 - port_w - 2 - 5 - age_w))
-    return {id(item): port_segments(item, port_w)
-            + [("  ", ""), (clip(names[id(item)], name_w).ljust(name_w), DIM if item.is_down else "")]
-            + status_segments(item, age_w) for item in rows}
+    name_w = max(1, min(max(map(len, names.values())), width - 4 - columns.port_w - 2 - 5 - columns.age_w))
+    return {id(item): row_end(item, columns, width, port_segments(item, columns) + [
+        ("  ", ""), (clip(names[id(item)], name_w).ljust(name_w), DIM if item.is_down else "")]) for item in rows}
 
 
 def render_groups(groups: List[Group], paint: Paint, width: int) -> List[str]:

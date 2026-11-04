@@ -855,6 +855,7 @@ class LayoutTest(unittest.TestCase):
                                                                          top="/t"), stack=self.stack, is_down=True)
         self.root = listener(3000, 3, args="node server.js", cwd=HOME_DIR, place=place())
         self.gone = listener(3417, 4, args="node server.js", cwd="/gone/feat-old-wt3")
+        self.gone.elapsed = "3-00:00:00"
         self.gone.others = [listener(3417, 5)]
 
     def parts(self, item):
@@ -899,24 +900,28 @@ class LayoutTest(unittest.TestCase):
         rows = [self.web, self.down, self.db, self.gone]
         return portly.render_groups(portly.group_rows(rows), portly.Paint(False), width)
 
-    def test_drops_the_tool_and_the_note_below_80_columns(self):
-        self.assertEqual([line.split() for line in self.lines(80)], [
+    def test_drops_the_tool_with_less_than_79_columns_of_room(self):
+        """79 is what the live view of an 80-column window gives the rows."""
+        self.assertEqual([line.split() for line in self.lines(79)], [
             ["shop", "·", "fix/cart", "·", "wt1", "/t"],
             ["20110", "web", "vite", "●", "2h"],
             ["20111", "api", "✗"],
             ["20113", "db", "mysql:8.4", "●", "6d"],
             [],
             ["folder", "gone"],
-            ["3417", "node", "server.js", "●", "+1", "process", "/gone/feat-old-wt3"],
+            ["3417", "node", "server.js", "●", "3d", "+1", "process", "/gone/feat-old-wt3"],
         ])
-        self.assertEqual([line.split() for line in self.lines(79)][1:], [
+        self.assertEqual([line.split() for line in self.lines(78)][1:], [
             ["20110", "web", "●", "2h"],
             ["20111", "api", "✗"],
             ["20113", "db", "●", "6d"],
             [],
             ["folder", "gone"],
-            ["3417", "node", "server.js", "●"],
+            ["3417", "node", "server.js", "●", "3d", "+1", "process", "/gone/feat-old-wt3"],
         ])
+        [gone] = [line for line in self.lines(50) if line.lstrip().startswith("3417")]
+        self.assertEqual(gone.split()[:6], ["3417", "node", "server.js", "●", "3d", "+1"])
+        self.assertLessEqual(len(gone), 50)
 
     def test_clips_a_note_to_the_window(self):
         self.gone.cwd += "/apps/web/and/a/folder/that/goes/on/and/on"
