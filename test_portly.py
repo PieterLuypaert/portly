@@ -727,7 +727,7 @@ class JsonTest(unittest.TestCase):
         data = json.loads(json.dumps(portly.as_json(item)))
         self.assertEqual(data["project"], {"repo": "shop", "branch": "fix/a", "worktree": True,
                                            "path": "/t", "folder": "apps/web"})
-        self.assertEqual(data["stack"], {"name": "shop", "index": 1, "role": "web", "up": 0, "of": 0})
+        self.assertEqual(data["stack"], {"name": "shop", "index": 1, "role": "web", "up": None, "of": None})
         self.assertEqual((data["pid"], data["container"], data["running_seconds"]), (7, None, 120))
         self.assertNotIn("connections", data)
 
@@ -1201,6 +1201,25 @@ class DownPortTest(unittest.TestCase):
         self.assertEqual(portly.age_of(mail), "3m")
         self.assertTrue(dict((key, note) for key, _, _, note in portly.detail_fields(mail))["state"]
                         .startswith("nothing listens on it · since "))
+
+    def test_a_container_port_counts_neither_way(self):
+        db = listener(20114, 9, args=DOCKER_BACKEND, cwd="/", place=self.tree_place)
+        db.container = portly.Container("shop-wt1-debug-1", "mailpit", "Up 1 hour", "shop-wt1", "debug", self.tree)
+        db.stack = self.stack
+        portly.with_down_ports(self.rows + [db])
+        self.assertEqual((self.stack.up, self.stack.of), (1, 3))
+
+    def test_a_header_counts_only_the_stack_it_names(self):
+        other = portly.Stack("shop", 2, self.tree, {"web": 20110}, self.stack.registry)
+        open(other.pid_file("web"), "w").close()
+        self.rows[0].stack = other
+        left = listener(20100, 8, args=DOCKER_BACKEND, cwd="/", place=self.tree_place)
+        left.container = portly.Container("shop-wt1-db-1", "mysql", "Up", "shop-wt1", "db", self.tree)
+        [group] = [g for g in portly.group_rows(portly.with_down_ports(self.rows + [left])) if g.title == "shop"]
+        self.assertEqual((other.up, other.of), (1, 1))
+        header = "".join(text for text, _ in portly.header_segments(group, 120))
+        self.assertIn("· wt1", header)
+        self.assertNotIn("up", header)
 
     def view(self):
         view = portly.LiveView(None, FakeScanner(portly.with_down_ports(self.rows)), [], False)
