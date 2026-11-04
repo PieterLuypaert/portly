@@ -813,14 +813,16 @@ def group_rows(rows: List[Listener]) -> List[Group]:
 
 def role_of(item: Listener) -> str:
     """What part of its project a port is: its wt stack's role, its compose
-    service or container, else the folder it runs from in its checkout
-    (apps/web gives web)."""
+    service or container, else the folder it runs from in its checkout,
+    without the first folder of a deeper one: apps/web gives web, and
+    apps/web/server web/server, so it stays apart from apps/api/server."""
     role = item.stack.role_of(item.port) if item.stack else ""
     if role:
         return role
     if item.container:
         return item.container.service or item.container.name
-    return os.path.basename(item.place.sub) if item.place else ""
+    head, _, rest = item.place.sub.partition("/") if item.place else ("", "", "")
+    return rest or head
 
 
 def tool_of(item: Listener) -> str:
@@ -852,22 +854,30 @@ def to_ansi(segments: List[Segment], paint: Paint) -> str:
     return "".join(paint(tone, text) for text, tone in segments)
 
 
+def group_stack(group: Group) -> str:
+    """wt<n> when a checkout's group is a wt stack. Only a checkout's: the
+    group of servers whose folder is gone holds leftovers of any stack."""
+    return next((word for word in map(stack_word, group.rows) if word), "") if group.branch else ""
+
+
 def header_segments(group: Group, width: int) -> List[Segment]:
-    """repo · branch · wt1, then the path, dim, while it fits. A worktree's
-    branch is coloured; wt1 names the wt stack it belongs to."""
+    """repo · branch · wt1, or repo · branch · worktree for a worktree wt did
+    not make, then the path, dim, while it fits. A part that does not fit is
+    left out, with what follows it."""
     tone = GONE if group.title == ORPHANS else DIM if group.title == OTHERS else ACCENT
-    # Only a checkout's group: one of servers whose folder is gone holds any stack's leftovers.
-    stack = next((word for word in map(stack_word, group.rows) if word), "") if group.branch else ""
-    parts = [(group.title, tone), (group.branch, WORKTREE if group.is_worktree else ""), (stack, WORKTREE)]
+    kind = group_stack(group) or ("worktree" if group.is_worktree else "")
+    parts = [(group.title, tone), (group.branch, WORKTREE if group.is_worktree else ""), (kind, WORKTREE)]
     segments: List[Segment] = [("  ", "")]
     room = width - 2
     for text, part_tone in (part for part in parts if part[0]):
-        if len(segments) > 1:
+        gap = 3 if len(segments) > 1 else 0
+        if room - gap < min(len(text), 4):
+            break
+        if gap:
             segments.append((" · ", DIM))
-            room -= 3
-        text = clip(text, max(room, 1))
+        text = clip(text, room - gap)
         segments.append((text, part_tone))
-        room -= len(text)
+        room -= gap + len(text)
     if group.path and room - 2 >= min(len(group.path), 4):
         segments += [("  ", ""), (clip(group.path, room - 2), DIM)]
     return segments

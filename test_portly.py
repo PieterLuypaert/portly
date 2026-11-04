@@ -831,7 +831,7 @@ class GroupTest(unittest.TestCase):
             ["shop", "·", "main", "/x/shop"],
             ["3000", "web", "vite", "●"],
             [],
-            ["shop", "·", "fix/thing", "/t"],
+            ["shop", "·", "fix/thing", "·", "worktree", "/t"],
             ["20110", "web", "vite", "●"],
             [],
             ["folder", "gone"],
@@ -867,6 +867,10 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(self.parts(self.root), ("", "node server.js", ("●", portly.FREE)))
         web = listener(3001, 6, args="node x/node_modules/.bin/vite", cwd=HOME_DIR, place=place(sub="apps/admin"))
         self.assertEqual(portly.role_of(web), "admin")
+        web.place.sub = "apps/web/server"
+        self.assertEqual(portly.role_of(web), "web/server")
+        web.place.sub = "web"
+        self.assertEqual(portly.role_of(web), "web")
         self.db.container.service = ""
         self.db.stack = None
         self.assertEqual(portly.role_of(self.db), "shop-wt1-db-1")
@@ -879,6 +883,17 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual("".join(text for text, _ in portly.header_segments(group, 23)), "  shop · fix/cart · wt1")
         [gone] = portly.group_rows([self.gone])
         self.assertEqual("".join(text for text, _ in portly.header_segments(gone, 80)), "  folder gone")
+
+    def test_a_header_leaves_out_what_does_not_fit(self):
+        long = listener(20110, 2, cwd=HOME_DIR, place=place(repo="a-shop-with-a-long-name-for-it", branch="feat/"
+                                                            + "a-branch-name-that-goes-on", is_worktree=True, top="/t"))
+        long.stack = self.stack
+        [group] = portly.group_rows([long])
+        for width in (30, 50, 64, 70):
+            header = "".join(text for text, _ in portly.header_segments(group, width))
+            self.assertLessEqual(len(header), width, header)
+        self.assertEqual("".join(text for text, _ in portly.header_segments(group, 50)),
+                         "  a-shop-with-a-long-name-for-it · feat/a-branch-…")
 
     def lines(self, width):
         rows = [self.web, self.down, self.db, self.gone]
