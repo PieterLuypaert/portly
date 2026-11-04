@@ -1163,11 +1163,11 @@ class DownPortTest(unittest.TestCase):
                                                 "connections", "restart")], [None] * 8)
         self.assertFalse(portly.as_json(self.rows[0])["down"])
         self.assertNotIn("log", portly.as_json(self.down()[20111]))
-        self.assertEqual(data["last_output"], "PHP Fatal error:  Allowed memory size exhausted")
+        self.assertEqual(data["last_lines"], ["starting api", "PHP Fatal error:  Allowed memory size exhausted"])
         rows = portly.with_down_ports(self.rows)
         self.assertEqual([(item.port, portly.as_json(item)["stack"]["up"], portly.as_json(item)["stack"]["of"])
                           for item in rows if item.stack], [(20110, 1, 3), (20111, 1, 3), (20112, 1, 3)])
-        self.assertIsNone(portly.as_json(rows[0])["last_output"])
+        self.assertIsNone(portly.as_json(rows[0])["last_lines"])
 
     def test_counts_the_ports_of_a_stack_that_are_up(self):
         """Of web, api and mail, which wt started servers for, web runs. db is
@@ -1992,7 +1992,7 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((data["port"], data["pid"], data["cwd"]), (port, proc.pid, os.path.realpath(self.folder)))
         self.assertEqual(sorted(data), sorted([
             "port", "name", "down", "url", "addresses", "local_only", "project", "stack", "container", "pid",
-            "last_output",
+            "last_lines",
             "command", "cwd", "folder_gone", "running_seconds", "memory_kb", "others",
             "log", "parent", "connections", "restart", "restart_problem"]))
 

@@ -1694,7 +1694,7 @@ def as_json(item: Listener, deep: bool = False) -> dict:
         "running_seconds": etime_seconds(item.elapsed) if process else None,
         "memory_kb": item.rss_kb if process else None,
         "others": [as_json(other, deep) for other in item.others],
-        "last_output": item.last_output[-1] if item.last_output else None,
+        "last_lines": item.last_output if item.is_down else None,
     }
     if deep:
         plan = item.restart
