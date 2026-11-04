@@ -17,10 +17,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Intel: GitHub's Apple Silicon runners are often out of capacity, and
+          # cancel a job they never start. portly is plain Python, so Intel tests
+          # the same code; back to macos-latest once Intel runners are retired.
           # The python3 macOS ships, which the README says is enough.
-          - os: macos-latest
+          - os: macos-26-intel
             python: system
-          - os: macos-latest
+          - os: macos-26-intel
             python: "3.x"
           # setup-python has no 3.9 build for Ubuntu 26.04 and later.
           - os: ubuntu-24.04
