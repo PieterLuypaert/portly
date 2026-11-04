@@ -216,6 +216,45 @@ class LiveViewTest(unittest.TestCase):
         for key in keys:
             self.assertTrue(self.view.handle(key))
 
+    def keys(self):
+        return [text for text, tone in self.view.footer_segments(200)[0] if tone == portly.ACCENT]
+
+    def test_the_key_row_shows_only_the_keys_for_the_selected_row(self):
+        self.assertEqual(self.keys(), ["↑↓", "o", "k", "RK", "?"])
+        self.rows[0].log = "/x/web.log"
+        self.rows[0].restart = portly.Restart(["pnpm", "dev"], "/x/shop/apps/web", [10, 1], "/x/web.log")
+        self.assertEqual(self.keys(), ["↑↓", "o", "l", "r", "k", "RK", "?"])
+        database = listener(5432, 5, args="postgres -D /x/db", cwd=HOME_DIR, place=place(sub="db"))
+        self.scanner.rows, self.scanner.version = self.rows + [database], 2
+        self.view.pull()
+        self.view.selected = 5432
+        self.assertEqual(self.keys(), ["↑↓", "k", "RK", "?"])
+        self.assertIn("RK project", "".join(text for text, _ in self.view.footer_segments(200)[0]))
+
+    def test_question_mark_lists_every_key_until_the_next_key(self):
+        stopped = []
+        self.view.run_in_background = lambda action, targets: stopped.append(targets)
+        self.press("?", "resize")
+        self.assertTrue(self.view.showing_keys)
+        listed = ["".join(text for text, _ in line).split()[0] for line in self.view.keys_lines()[2:]]
+        self.assertEqual(listed, ["↑↓", "o", "c", "l", "r", "k", "R", "/", "esc", "a", "?", "q"])
+        self.press("k")
+        self.assertEqual((self.view.showing_keys, self.view.confirm), (False, None))
+        self.press("?", "q")
+        self.assertFalse(self.view.showing_keys)
+        self.assertFalse(self.view.handle("q"))
+        self.assertEqual(stopped, [])
+
+    def test_the_key_list_keeps_a_running_stop_and_its_outcome_in_sight(self):
+        self.press("?")
+        footer = lambda: "".join(text for text, _ in self.view.footer_segments(200)[0])
+        self.assertEqual(footer(), " any key closes this")
+        self.view.busy = "stopping 3000"
+        self.assertIn("stopping 3000", footer())
+        self.view.busy = ""
+        self.view.say("3000 is free")
+        self.assertEqual(footer(), " 3000 is free")
+
     def test_says_when_no_browser_opener_is_found(self):
         self.addCleanup(setattr, portly, "opener", portly.opener)
         portly.opener = lambda: "/nonexistent/xdg-open"
@@ -498,6 +537,10 @@ class LiveTerminalTest(unittest.TestCase):
     def test_draws_the_server_takes_keys_and_quits(self):
         self.press("\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[H", "\x1b[<64;3;3M", "\x1b[<0;3;3M", "a")
         self.press("/", "x", "\x7f", "\x1b")
+        self.press("?")
+        self.expect("these keys")
+        self.press("x")
+        self.expect(self.port)
         self.quit()
 
     def test_survives_a_window_too_small_and_comes_back(self):
@@ -796,15 +839,105 @@ class GroupTest(unittest.TestCase):
         ]
         lines = portly.render_groups(portly.group_rows(rows), portly.Paint(False), 120)
         self.assertEqual([line.split() for line in lines], [
-            ["shop", "main", "/x/shop"],
-            ["3000", "vite", "apps/web", "pid", "1"],
+            ["shop", "·", "main", "/x/shop"],
+            ["3000", "web", "vite", "●"],
             [],
-            ["shop", "wt", "fix/thing", "/t"],
-            ["20110", "vite", "apps/web", "pid", "2"],
+            ["shop", "·", "fix/thing", "·", "worktree", "/t"],
+            ["20110", "web", "vite", "●"],
             [],
             ["folder", "gone"],
-            ["3417", "node", "server.js", "/nowhere/at/all", "pid", "3"],
+            ["3417", "node", "server.js", "●", "/nowhere/at/all"],
         ])
+
+
+class LayoutTest(unittest.TestCase):
+    """The row: port, role, tool, status, age and a note; the header: repo ·
+    branch · wt<n> and the path."""
+
+    def setUp(self):
+        tree = place(sub="apps/web", branch="fix/cart", is_worktree=True, top="/t")
+        self.stack = portly.Stack("shop", 1, "/t", {"web": 20110, "api": 20111})
+        self.web = listener(20110, 2, args="node x/node_modules/.bin/vite", cwd=HOME_DIR, place=tree)
+        self.web.stack, self.web.elapsed = self.stack, "02:00:00"
+        self.db = listener(20113, 9, args=DOCKER_BACKEND, cwd="/", place=tree)
+        self.db.container = portly.Container("shop-wt1-db-1", "mysql:8.4", "Up 6 days", "shop-wt1", "db", "/t")
+        self.db.stack = self.stack
+        self.down = portly.Listener(20111, 0, "api", cwd="/t", place=place(branch="fix/cart", is_worktree=True,
+                                                                         top="/t"), stack=self.stack, is_down=True)
+        self.root = listener(3000, 3, args="node server.js", cwd=HOME_DIR, place=place())
+        self.gone = listener(3417, 4, args="node server.js", cwd="/gone/feat-old-wt3")
+        self.gone.elapsed = "3-00:00:00"
+        self.gone.others = [listener(3417, 5)]
+
+    def parts(self, item):
+        return portly.role_of(item), portly.tool_of(item), portly.status_of(item)
+
+    def test_names_a_rows_role_tool_and_status(self):
+        self.assertEqual(self.parts(self.web), ("web", "vite", ("●", portly.FREE)))
+        self.assertEqual(self.parts(self.db), ("db", "mysql:8.4", ("●", portly.FREE)))
+        self.assertEqual(self.parts(self.down), ("api", "", ("✗", portly.GONE)))
+        self.assertEqual(self.parts(self.root), ("", "node server.js", ("●", portly.FREE)))
+        web = listener(3001, 6, args="node x/node_modules/.bin/vite", cwd=HOME_DIR, place=place(sub="apps/admin"))
+        self.assertEqual(portly.role_of(web), "admin")
+        web.place.sub = "apps/web/server"
+        self.assertEqual(portly.role_of(web), "web/server")
+        web.place.sub = "web"
+        self.assertEqual(portly.role_of(web), "web")
+        self.db.container.service = ""
+        self.db.stack = None
+        self.assertEqual(portly.role_of(self.db), "shop-wt1-db-1")
+
+    def test_a_header_names_the_branch_and_the_wt_stack(self):
+        [group] = portly.group_rows([self.web, self.down])
+        header = [(text, tone) for text, tone in portly.header_segments(group, 80) if text.strip()]
+        self.assertEqual(header, [("shop", portly.ACCENT), (" · ", portly.DIM), ("fix/cart", portly.WORKTREE),
+                                  (" · ", portly.DIM), ("wt1", portly.WORKTREE), ("/t", portly.DIM)])
+        self.assertEqual("".join(text for text, _ in portly.header_segments(group, 23)), "  shop · fix/cart · wt1")
+        [gone] = portly.group_rows([self.gone])
+        self.assertEqual("".join(text for text, _ in portly.header_segments(gone, 80)), "  folder gone")
+
+    def test_a_header_leaves_out_what_does_not_fit(self):
+        long = listener(20110, 2, cwd=HOME_DIR, place=place(repo="a-shop-with-a-long-name-for-it", branch="feat/"
+                                                            + "a-branch-name-that-goes-on", is_worktree=True, top="/t"))
+        long.stack = self.stack
+        [group] = portly.group_rows([long])
+        for width in (30, 50, 64, 70):
+            header = "".join(text for text, _ in portly.header_segments(group, width))
+            self.assertLessEqual(len(header), width, header)
+        self.assertEqual("".join(text for text, _ in portly.header_segments(group, 50)),
+                         "  a-shop-with-a-long-name-for-it · feat/a-branch-…")
+
+    def lines(self, width):
+        rows = [self.web, self.down, self.db, self.gone]
+        return portly.render_groups(portly.group_rows(rows), portly.Paint(False), width)
+
+    def test_drops_the_tool_with_less_than_79_columns_of_room(self):
+        """79 is what the live view of an 80-column window gives the rows."""
+        self.assertEqual([line.split() for line in self.lines(79)], [
+            ["shop", "·", "fix/cart", "·", "wt1", "/t"],
+            ["20110", "web", "vite", "●", "2h"],
+            ["20111", "api", "✗"],
+            ["20113", "db", "mysql:8.4", "●", "6d"],
+            [],
+            ["folder", "gone"],
+            ["3417", "node", "server.js", "●", "3d", "+1", "process", "/gone/feat-old-wt3"],
+        ])
+        self.assertEqual([line.split() for line in self.lines(78)][1:], [
+            ["20110", "web", "●", "2h"],
+            ["20111", "api", "✗"],
+            ["20113", "db", "●", "6d"],
+            [],
+            ["folder", "gone"],
+            ["3417", "node", "server.js", "●", "3d", "+1", "process", "/gone/feat-old-wt3"],
+        ])
+        [gone] = [line for line in self.lines(50) if line.lstrip().startswith("3417")]
+        self.assertEqual(gone.split()[:6], ["3417", "node", "server.js", "●", "3d", "+1"])
+        self.assertLessEqual(len(gone), 50)
+
+    def test_clips_a_note_to_the_window(self):
+        self.gone.cwd += "/apps/web/and/a/folder/that/goes/on/and/on"
+        [line] = [line for line in self.lines(80) if line.lstrip().startswith("3417")]
+        self.assertEqual((len(line), line[-1]), (80, "…"))
 
 
 def stack_rows():
@@ -942,18 +1075,19 @@ class DownPortTest(unittest.TestCase):
         groups = portly.group_rows(portly.visible(portly.with_down_ports(self.rows), [], False))
         lines = portly.render_groups(groups, portly.Paint(False), 120)
         self.assertEqual([line.split() for line in lines], [
-            ["blog", "main", "/x/blog"],
-            ["20113", "postgres", "pid", "5"],
+            ["blog", "·", "main", "/x/blog"],
+            ["20113", "postgres", "●"],
             [],
-            ["shop", "wt", "fix/cart", portly.tilde(self.tree)],
-            ["20110", "vite", "apps/web", "pid", "2"],
-            ["20111", "api", "down"],
-            ["20112", "mail", "down"],
+            ["shop", "·", "fix/cart", "·", "wt1", portly.tilde(self.tree)],
+            ["20110", "web", "vite", "●"],
+            ["20111", "api", "✗"],
+            ["20112", "mail", "✗"],
         ])
         [api] = [segments for item, _, segments in portly.group_lines(groups, 120) if item and item.port == 20111]
         self.assertEqual([(text.strip(), tone) for text, tone in api if text.strip()],
-                         [("20111", portly.DIM), ("api", portly.DIM), ("down", portly.GONE)])
-        self.assertEqual(portly.ports_summary(groups), "2 ports in 2 projects, 2 down")
+                         [("20111", portly.DIM), ("api", portly.DIM), ("✗", portly.GONE)])
+        self.assertEqual(portly.summary_segments(groups), [("2 projects · 2 ports", portly.DIM), (" · ", portly.DIM),
+                                                           ("2 down", portly.GONE)])
 
     def test_a_filter_finds_a_down_port_by_its_role_or_stack(self):
         rows = portly.with_down_ports(self.rows)
@@ -1002,10 +1136,10 @@ class DownPortTest(unittest.TestCase):
         view.handle("r")
         self.assertEqual((view.confirm, view.message), (None, "20111 api is down: nothing runs to restart"))
         view.message = ""
-        footer = dict((text, tone) for text, tone in view.footer_segments(200)[0])
-        self.assertEqual((footer["k"], footer["r"], footer["l"], footer["o"]),
-                         (portly.DIM, portly.DIM, portly.ACCENT, portly.DIM))
-        self.assertEqual(view.title_segments(200)[0][1][0], "2 ports in 2 projects, 2 down")
+        keys = [text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT]
+        self.assertEqual(keys, ["↑↓", "l", "RK", "?"])
+        self.assertIn("RK stack", "".join(text for text, _ in view.footer_segments(200)[0]))
+        self.assertEqual(view.title_segments(200)[0][1:], portly.summary_segments(view.groups))
         view.handle("K")
         self.assertEqual(view.confirm[0], "Stop 1 port of shop wt fix/cart?")
         view.handle("y")
@@ -1058,7 +1192,7 @@ class DockerTest(unittest.TestCase):
         lines = portly.render_groups(portly.group_rows([item]), portly.Paint(False), 120)
         self.assertEqual(lines[1].split()[-2:], ["+1", "process"])
         other.container = portly.Container("blog-db-1", "postgres:16", "Up 1 hour", "blog", "db", "/x/blog")
-        self.assertEqual(portly.pid_text(item), "+1 container")
+        self.assertEqual(portly.note_of(item), [("+1 container", portly.DIM)])
         other.container = None
         details = [" ".join(line.split()) for line in portly.render_detail(item, portly.Paint(False))]
         self.assertIn("also pid 900 (postgres) 127.0.0.1", details)
@@ -1090,7 +1224,7 @@ class DockerTest(unittest.TestCase):
         item.container = portly.Container("api-database-1", "mysql:8.4", "Up 6 days", "api", "database", "/x")
         self.assertTrue(portly.is_dev(item))
         lines = portly.render_groups(portly.group_rows([item]), portly.Paint(False), 120)
-        self.assertEqual(lines[1].split(), ["3306", "database", "docker", "api", "mysql:8.4", "6d"])
+        self.assertEqual(lines[:2], ["  docker api  /x", "    3306  database  mysql:8.4  ●  6d"])
 
 
 class DetailTest(unittest.TestCase):
@@ -1880,7 +2014,7 @@ class CommandTest(unittest.TestCase):
             lines.write("api crashed\n")
         code, out, _ = self.call("list", self.word)
         self.assertEqual(code, 0)
-        self.assertIn([str(api), "api", "down"], [line.split() for line in out.splitlines()])
+        self.assertIn([str(api), "api", "✗"], [line.split() for line in out.splitlines()])
         code, out, _ = self.call(str(api))
         self.assertIn("nothing listens on it", out)
         self.assertIn("portly logs", out)

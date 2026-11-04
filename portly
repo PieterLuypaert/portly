@@ -811,13 +811,33 @@ def group_rows(rows: List[Listener]) -> List[Group]:
     return [groups[key] for key in sorted(groups)]
 
 
-def where(item: Listener) -> str:
-    """Where inside its project a port runs: the folder, or the docker project."""
+def role_of(item: Listener) -> str:
+    """What part of its project a port is: its wt stack's role, its compose
+    service or container, else the folder it runs from in its checkout,
+    without the first folder of a deeper one: apps/web gives web, and
+    apps/web/server web/server, so it stays apart from apps/api/server."""
+    role = item.stack.role_of(item.port) if item.stack else ""
+    if role:
+        return role
     if item.container:
-        return f"docker {item.container.project or item.container.name}"
-    if item.place:
-        return item.place.sub
-    return tilde(item.cwd) if is_orphan(item) else ""
+        return item.container.service or item.container.name
+    head, _, rest = item.place.sub.partition("/") if item.place else ("", "", "")
+    return rest or head
+
+
+def tool_of(item: Listener) -> str:
+    """What runs on a port: the tool or script, or a container's image. A down port runs nothing."""
+    if item.is_down:
+        return ""
+    return item.container.image if item.container else label(item)
+
+
+# The status column: one glyph per row. Its shape keeps the meaning without colour.
+RUNNING, DOWN = "●", "✗"
+
+
+def status_of(item: Listener) -> Tuple[str, str]:
+    return (DOWN, GONE) if item.is_down else (RUNNING, FREE)
 
 
 def branch_text(branch: str, is_worktree: bool) -> str:
@@ -834,36 +854,64 @@ def to_ansi(segments: List[Segment], paint: Paint) -> str:
     return "".join(paint(tone, text) for text, tone in segments)
 
 
+def group_stack(group: Group) -> str:
+    """wt<n> when a checkout's group is a wt stack. Only a checkout's: the
+    group of servers whose folder is gone holds leftovers of any stack."""
+    return next((word for word in map(stack_word, group.rows) if word), "") if group.branch else ""
+
+
 def header_segments(group: Group, width: int) -> List[Segment]:
+    """repo · branch · wt1, or repo · branch · worktree for a worktree wt did
+    not make, then the path, dim, while it fits. A part that does not fit is
+    left out, with what follows it."""
     tone = GONE if group.title == ORPHANS else DIM if group.title == OTHERS else ACCENT
-    title = clip(group.title, width - 2)
-    branch = branch_text(group.branch, group.is_worktree)
-    gaps = 2 * (bool(branch) + bool(group.path))
-    branch_w, path_w = fit([len(branch), len(group.path)], [min(len(branch), 12), 0],
-                           width - 2 - len(title) - gaps)
-    segments = [("  ", ""), (title, tone)]
-    if branch and branch_w > 0:
-        branch = clip(branch, branch_w)
-        if group.is_worktree:
-            segments += [("  ", ""), (branch[:2], WORKTREE), (branch[2:], "")]
-        else:
-            segments += [("  ", ""), (branch, "")]
-    if group.path and path_w >= min(len(group.path), 4):
-        segments += [("  ", ""), (clip(group.path, path_w), DIM)]
+    kind = group_stack(group) or ("worktree" if group.is_worktree else "")
+    parts = [(group.title, tone), (group.branch, WORKTREE if group.is_worktree else ""), (kind, WORKTREE)]
+    segments: List[Segment] = [("  ", "")]
+    room = width - 2
+    for text, part_tone in (part for part in parts if part[0]):
+        gap = 3 if len(segments) > 1 else 0
+        if room - gap < min(len(text), 4):
+            break
+        if gap:
+            segments.append((" · ", DIM))
+        text = clip(text, room - gap)
+        segments.append((text, part_tone))
+        room -= gap + len(text)
+    if group.path and room - 2 >= min(len(group.path), 4):
+        segments += [("  ", ""), (clip(group.path, room - 2), DIM)]
     return segments
 
 
-def pid_text(item: Listener) -> str:
-    """The pid column: pid 123, and +1 process when another server shares the port.
-    Docker's own pid says nothing about the container; a down port has none."""
+def note_of(item: Listener) -> List[Segment]:
+    """The dim text at the end of a row: +1 process when another server
+    shares the port, and the folder a server runs from when it is gone.
+    Docker's own pid says nothing about the container, so a port with only
+    containers beside it says +1 container. A down port runs nothing to note."""
+    notes: List[Segment] = []
     if item.is_down:
-        return "down"
-    parts = [] if item.container else [f"pid {item.pid}"]
+        return notes
     if item.others:
         containers = all(other.container for other in item.others)
         kind = ("container", "containers") if containers else ("process", "processes")
-        parts.append("+" + plural(len(item.others), *kind))
-    return "  ".join(parts)
+        notes.append(("+" + plural(len(item.others), *kind), DIM))
+    if is_orphan(item):
+        notes.append((tilde(item.cwd), GONE))
+    return notes
+
+
+# A row has every column from this much room on: an 80-column window, whose
+# last column the live view leaves empty. Narrower, a row keeps port, name,
+# status and age, and its note while that fits.
+FULL_ROW = 79
+
+
+@dataclass
+class Columns:
+    """What the rows of one list share: the port and age widths that line them up, and each row's age."""
+    port_w: int
+    age_w: int
+    ages: Dict[int, str]
 
 
 def group_lines(groups: List[Group], width: int) -> List[Line]:
@@ -872,35 +920,56 @@ def group_lines(groups: List[Group], width: int) -> List[Line]:
     rows = [item for group in groups for item in group.rows]
     if not rows:
         return []
-    whats = {item.port: label(item) for item in rows}
-    wheres = {item.port: where(item) for item in rows}
-    images = {item.port: item.container.image if item.container else "" for item in rows}
-    ages = {item.port: age_of(item) for item in rows}
-    pids = {item.port: pid_text(item) for item in rows}
-    port_w = max(len(str(item.port)) for item in rows)
-    age_w, pid_w = (max(map(len, col.values())) for col in (ages, pids))
-    widths = [max(map(len, col.values())) for col in (whats, wheres, images)]
-    gaps = 2 * (2 + sum(1 for w in widths if w))
-    what_w, where_w, image_w = fit(widths, [min(w, 12) for w in widths],
-                                   width - 4 - port_w - age_w - pid_w - gaps)
+    ages = {id(item): age_of(item) for item in rows}
+    columns = Columns(max(len(str(item.port)) for item in rows), max(map(len, ages.values())), ages)
+    row_segments = (full_rows if width >= FULL_ROW else narrow_rows)(rows, width, columns)
     lines: List[Line] = []
     for group in groups:
         if lines:
             lines.append((None, None, []))
         lines.append((None, group, header_segments(group, width)))
-        for item in group.rows:
-            tone = DIM if item.is_down else ""
-            segments = [("    ", ""), (str(item.port).rjust(port_w), tone or BOLD),
-                        ("  ", ""), (clip(whats[item.port], what_w).ljust(what_w), tone)]
-            if where_w:
-                segments += [("  ", ""), (clip(wheres[item.port], where_w).ljust(where_w),
-                                          GONE if is_orphan(item) else "")]
-            if image_w:
-                segments += [("  ", ""), (clip(images[item.port], image_w).ljust(image_w), DIM)]
-            segments += [("  ", ""), (ages[item.port].rjust(age_w), DIM),
-                         ("  ", ""), (pids[item.port], GONE if item.is_down else DIM)]
-            lines.append((item, group, segments))
+        lines += [(item, group, row_segments[id(item)]) for item in group.rows]
     return lines
+
+
+def port_segments(item: Listener, columns: Columns) -> List[Segment]:
+    return [("    ", ""), (str(item.port).rjust(columns.port_w), DIM if item.is_down else BOLD)]
+
+
+def row_end(item: Listener, columns: Columns, width: int, segments: List[Segment]) -> List[Segment]:
+    """segments, then status, age and each note that fits."""
+    segments = segments + [("  ", ""), status_of(item), ("  ", ""), (columns.ages[id(item)].rjust(columns.age_w), DIM)]
+    for text, tone in note_of(item):
+        room = width - sum(len(piece) for piece, _ in segments) - 2
+        if room >= min(len(text), 4):
+            segments += [("  ", ""), (clip(text, room), tone)]
+    return segments
+
+
+def full_rows(rows: List[Listener], width: int, columns: Columns) -> Dict[int, List[Segment]]:
+    """Per row: port, role, tool, status, age and the note, which gets what is left."""
+    roles = {id(item): role_of(item) for item in rows}
+    tools = {id(item): tool_of(item) for item in rows}
+    widths = [max(map(len, col.values())) for col in (roles, tools)]
+    gaps = 2 * sum(1 for w in widths if w)
+    role_w, tool_w = fit(widths, [min(w, 8) for w in widths], width - 4 - columns.port_w - gaps - 5 - columns.age_w)
+    lines = {}
+    for item in rows:
+        segments = port_segments(item, columns)
+        if role_w:
+            segments += [("  ", ""), (clip(roles[id(item)], role_w).ljust(role_w), DIM if item.is_down else "")]
+        if tool_w:
+            segments += [("  ", ""), (clip(tools[id(item)], tool_w).ljust(tool_w), DIM)]
+        lines[id(item)] = row_end(item, columns, width, segments)
+    return lines
+
+
+def narrow_rows(rows: List[Listener], width: int, columns: Columns) -> Dict[int, List[Segment]]:
+    """Per row: port, its role or else its tool, status, age, and the note while it fits."""
+    names = {id(item): role_of(item) or tool_of(item) for item in rows}
+    name_w = max(1, min(max(map(len, names.values())), width - 4 - columns.port_w - 2 - 5 - columns.age_w))
+    return {id(item): row_end(item, columns, width, port_segments(item, columns) + [
+        ("  ", ""), (clip(names[id(item)], name_w).ljust(name_w), DIM if item.is_down else "")]) for item in rows}
 
 
 def render_groups(groups: List[Group], paint: Paint, width: int) -> List[str]:
@@ -1567,12 +1636,12 @@ def visible(rows: List[Listener], terms: List[str], show_all: bool) -> List[List
     return found or [item for item in rows if matches(item, terms)]
 
 
-def ports_summary(groups: List[Group]) -> str:
-    """4 ports in 2 projects, and 1 down when a stack port is."""
+def summary_segments(groups: List[Group]) -> List[Segment]:
+    """2 projects · 4 ports, and · 1 down in red when a stack port is."""
     rows = [item for group in groups for item in group.rows]
     down = sum(1 for item in rows if item.is_down)
-    text = f"{plural(len(rows) - down, 'port', 'ports')} in {plural(len(groups), 'project', 'projects')}"
-    return text + (f", {down} down" if down else "")
+    segments = [(f"{plural(len(groups), 'project', 'projects')} · {plural(len(rows) - down, 'port', 'ports')}", DIM)]
+    return segments + ([(" · ", DIM), (f"{down} down", GONE)] if down else [])
 
 
 def show_list(rows: List[Listener], terms: List[str], show_all: bool, paint: Paint) -> int:
@@ -1588,7 +1657,7 @@ def show_list(rows: List[Listener], terms: List[str], show_all: bool, paint: Pai
     print("\n" + "\n".join(render_groups(groups, paint, width)) + "\n")
     if sys.stdout.isatty():
         hint = "  ·  portly 3000 for details  ·  portly for the interactive view"
-        print(f"  {paint(DIM, ports_summary(groups) + hint)}\n")
+        print(f"  {to_ansi(summary_segments(groups), paint)}{paint(DIM, hint)}\n")
     return 0
 
 
@@ -1762,8 +1831,24 @@ class KeyReader:
 class LiveView:
     """portly live: the grouped list on top, the selected port below, keys at the bottom."""
 
-    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("c", "copy"), ("r", "restart"), ("k", "stop"),
-            ("R K", "whole project"), ("/", "search"), ("a", "all"), ("q", "quit")]
+    # The key row: only the keys that do something for the selected row.
+    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("r", "restart"), ("k", "stop"),
+            ("RK", "stack"), ("?", "keys")]
+    # What ? lists: every key.
+    ALL_KEYS = [
+        ("↑↓ pgup pgdn home end", "select a port; a click selects one, the wheel scrolls"),
+        ("o enter", "open its url in the browser"),
+        ("c", "copy its url"),
+        ("l", "follow its output"),
+        ("r", "restart it the way it was started"),
+        ("k", "stop it"),
+        ("R K", "restart or stop every port of its stack or project"),
+        ("/", "filter by project, branch, folder or tool; enter keeps it"),
+        ("esc", "clear the filter"),
+        ("a", "show apps and helper processes too, or hide them again"),
+        ("?", "these keys"),
+        ("q", "quit"),
+    ]
 
     def __init__(self, screen, scanner: Scanner, terms: List[str], show_all: bool):
         self.screen, self.scanner = screen, scanner
@@ -1779,6 +1864,7 @@ class LiveView:
         self.busy, self.busy_lock = "", threading.Lock()
         self.message, self.message_tone, self.message_at = "", "", 0.0
         self.row_at: Dict[int, int] = {}  # screen line to port, for the mouse
+        self.showing_keys = False  # ? shows every key over the list, until the next key
 
     # --- state
 
@@ -1918,6 +2004,9 @@ class LiveView:
             return True
         if self.editing:
             return self.edit_filter(key)
+        if self.showing_keys:
+            self.showing_keys = key == "resize"  # any key closes the list and does nothing else
+            return True
         if key == "q":
             return False
         if key == "esc":
@@ -1937,6 +2026,8 @@ class LiveView:
             actions[key]()
         elif key == "/":
             self.editing = True
+        elif key == "?":
+            self.showing_keys = True
         elif key == "a":
             self.show_all = not self.show_all
             self.rebuild()
@@ -2019,19 +2110,36 @@ class LiveView:
             return [(f" {frame} ", ACCENT), (busy, ""), ("  ", "")] + said, False
         if said:
             return said, False
-        item = self.current()
-        possible = {"o": bool(item and url_of(item)), "c": bool(item and url_of(item)),
-                    "r": bool(item and (item.container or item.restart)),
-                    "l": bool(item and (item.container or item.log)),
-                    "k": bool(item and not item.is_down and not is_docker_itself(item)), "K": bool(item)}
+        if self.showing_keys:
+            return [(" any key closes this", DIM)], False
+        group = self.current_group()
+        possible = self.possible_keys()
         segments: List[Segment] = [(" ", "")]
         for key, what in self.KEYS:
-            on = possible.get(key, True)
-            segments += [(key, ACCENT if on else DIM), (f" {what}   ", "" if on else DIM)]
+            if key == "RK" and group and not group_stack(group):
+                what = "project"
+            if key in possible:
+                segments += [(key, ACCENT), (f" {what}  ", DIM)]
         return segments, False
 
+    def possible_keys(self) -> Set[str]:
+        """The keys of the key row that do something for the selected row."""
+        item, group = self.current(), self.current_group()
+        if not item or not group:
+            return {"?"}
+        checks = {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log),
+                  "r": bool(item.container or item.restart),
+                  "k": not item.is_down and not is_docker_itself(item),
+                  "RK": any(not row.is_down for row in group.rows), "?": True}
+        return {key for key, on in checks.items() if on}
+
+    def keys_lines(self) -> List[List[Segment]]:
+        key_w = max(len(key) for key, _ in self.ALL_KEYS) + 3
+        return [[("  ", ""), ("keys", BOLD)], []] + [
+            [("    ", ""), (key.ljust(key_w), ACCENT), (what, "")] for key, what in self.ALL_KEYS]
+
     def title_segments(self, width: int) -> Tuple[List[Segment], List[Segment]]:
-        left = [("  ", DIM), (ports_summary(self.groups), DIM)]
+        left = [("  ", DIM)] + summary_segments(self.groups)
         right: List[Segment] = []
         if self.filter:
             right += [("/", ACCENT), (self.filter, BOLD), ("  ", "")]
@@ -2060,6 +2168,13 @@ class LiveView:
         x = max(x + 2, width - 1 - right_w)
         for text, tone in right:
             x = self.put(0, x, text, styles.normal[tone])
+        if self.showing_keys:
+            self.row_at = {}
+            for offset, segments in enumerate(self.keys_lines()[: height - 3]):
+                self.put_segments(2 + offset, segments, styles.normal)
+            self.put_segments(height - 1, self.footer_segments(width)[0], styles.normal)
+            screen.refresh()
+            return
 
         item = self.current()
         detail = self.detail_segments(item, width) if item else []
