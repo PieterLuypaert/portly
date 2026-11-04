@@ -126,6 +126,7 @@ class Listener:
     others: List["Listener"] = field(default_factory=list)  # other servers on this port, beside this row
     is_down: bool = False  # a wt stack's port that nothing listens on: no process, pid 0
     last_output: List[str] = field(default_factory=list)  # a down port's last lines in wt's log
+    down_since: float = 0.0  # when the live view saw a down port go down; 0 when it does not know
     # Only read for the detail views (deep=True):
     parent: str = ""  # short command line of the parent
     log: str = ""  # the file its output goes to: stdout, or an open .log
@@ -744,6 +745,9 @@ def docker_age(status: str) -> str:
 
 
 def age_of(item: Listener) -> str:
+    """How long it runs, or for a down port how long it has been down, when the live view saw it go."""
+    if item.is_down:
+        return short_duration(int(time.time() - item.down_since)) if item.down_since else ""
     return docker_age(item.container.status) if item.container else short_age(item.elapsed)
 
 
@@ -1130,7 +1134,8 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
         role = next((role for role, port in item.stack.ports.items() if port == item.port), "")
         add("stack", f"wt {item.stack.index} of {item.stack.name}", note=role)
     if item.is_down:
-        add("state", "down", GONE, "nothing listens on it")
+        since = f" · since {started_at(int(time.time() - item.down_since))}" if item.down_since else ""
+        add("state", "down", GONE, "nothing listens on it" + since)
         add("output", output_of(item))
         for number, line in enumerate(item.last_output):
             add("last lines" if number == 0 else "", line, GONE if number == len(item.last_output) - 1 else DIM)
@@ -1728,6 +1733,18 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
+def remember_downs(rows: List[Listener], before: Optional[List[Listener]], now: Optional[float] = None) -> None:
+    """Give each down row of a scan when it went down: now when it listened
+    at the scan before, else what that scan knew. Down from the first scan
+    on, it has no known time."""
+    now = time.time() if now is None else now
+    was_up = {item.port for item in before or [] if not item.is_down}
+    since = {item.port: item.down_since for item in before or [] if item.is_down}
+    for item in rows:
+        if item.is_down:
+            item.down_since = now if item.port in was_up else since.get(item.port, 0.0)
+
+
 class Scanner(threading.Thread):
     """Reads every port in the background, every few seconds or on demand."""
 
@@ -1745,6 +1762,7 @@ class Scanner(threading.Thread):
         while True:
             try:
                 rows = with_down_ports(one_per_port(read_listeners(deep=True)))
+                remember_downs(rows, self.rows)
             except Exception as error:  # the view stays up and shows what went wrong
                 with self.lock:
                     self.error = f"scan failed: {error}"

@@ -1164,6 +1164,26 @@ class DownPortTest(unittest.TestCase):
         self.assertIn(("1/1 up", portly.FREE), portly.header_segments(group, 120))
         self.assertNotIn("up", "".join(text for text, _ in portly.header_segments(group, 26)))
 
+    def test_the_live_view_remembers_when_a_port_went_down(self):
+        first = portly.with_down_ports(self.rows)
+        portly.remember_downs(first, None, now=1000.0)
+        self.assertEqual([item.down_since for item in first if item.is_down], [0.0, 0.0])
+        mail = listener(20112, 3, args="node mail.js", cwd=self.tree, place=self.tree_place)
+        mail.stack = self.stack
+        up = portly.with_down_ports(self.rows + [mail])
+        portly.remember_downs(up, first, now=1100.0)
+        down = portly.with_down_ports(self.rows)
+        portly.remember_downs(down, up, now=1200.0)
+        self.assertEqual({item.port: item.down_since for item in down if item.is_down}, {20111: 0.0, 20112: 1200.0})
+        later = portly.with_down_ports(self.rows)
+        portly.remember_downs(later, down, now=1500.0)
+        self.assertEqual({item.port: item.down_since for item in later if item.is_down}, {20111: 0.0, 20112: 1200.0})
+        [mail] = [item for item in later if item.port == 20112]
+        mail.down_since = time.time() - 180
+        self.assertEqual(portly.age_of(mail), "3m")
+        self.assertTrue(dict((key, note) for key, _, _, note in portly.detail_fields(mail))["state"]
+                        .startswith("nothing listens on it · since "))
+
     def view(self):
         view = portly.LiveView(None, FakeScanner(portly.with_down_ports(self.rows)), [], False)
         view.pull()
