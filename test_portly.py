@@ -1050,6 +1050,15 @@ class LastLinesTest(unittest.TestCase):
         self.assertEqual(portly.last_lines(path, 1), ["Error curly keys"])
 
 
+class CellsTest(unittest.TestCase):
+    def test_counts_and_clips_by_terminal_cells(self):
+        self.assertEqual([portly.cells(text) for text in ("vite", "🚀 up", "café", "e\u0301")], [4, 5, 4, 1])
+        self.assertEqual(portly.clip("🚀 Server crashed", 8), "🚀 Serv…")
+        self.assertEqual(portly.cells(portly.clip("日本語のエラー", 7)), 7)
+        self.assertEqual((portly.cut("🚀🚀", 3), portly.cut("abc", 2)), ("🚀", "ab"))
+        self.assertEqual(portly.clip("abc", 3), "abc")
+
+
 class DownPortTest(unittest.TestCase):
     """Stack wt1 of shop runs its web; its api and mail are down, and another
     checkout holds its db port. wt started a server for web, api and mail,

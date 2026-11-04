@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, replace
@@ -801,8 +802,30 @@ class Paint:
 BOLD, DIM, WORKTREE, GONE, FREE, ACCENT, LINK = "1", "90", "33", "31", "32", "1;38;5;208", "4;36"
 
 
+def cells(text: str) -> int:
+    """The terminal cells text takes: two for a wide character, such as an
+    emoji or a CJK one, none for a combining mark."""
+    if text.isascii():
+        return len(text)
+    return sum(0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in "WF" else 1
+               for char in text)
+
+
+def cut(text: str, room: int) -> str:
+    """The longest start of text that fits in room cells."""
+    if text.isascii():
+        return text[: max(room, 0)]
+    used = 0
+    for index, char in enumerate(text):
+        used += cells(char)
+        if used > room:
+            return text[:index]
+    return text
+
+
 def clip(text: str, width: int) -> str:
-    return text if len(text) <= width else text[: max(width - 1, 0)] + "…"
+    """text in width cells, with … where it was cut."""
+    return text if cells(text) <= width else cut(text, width - 1) + "…"
 
 
 def fit(widths: List[int], mins: List[int], room: int) -> List[int]:
@@ -999,7 +1022,7 @@ def row_end(item: Listener, columns: Columns, width: int, segments: List[Segment
     """segments, then status, age and each note that fits."""
     segments = segments + [("  ", ""), status_of(item), ("  ", ""), (columns.ages[id(item)].rjust(columns.age_w), DIM)]
     for text, tone in note_of(item):
-        room = width - sum(len(piece) for piece, _ in segments) - 2
+        room = width - sum(cells(piece) for piece, _ in segments) - 2
         if room >= min(len(text), 4):
             segments += [("  ", ""), (clip(text, room), tone)]
     return segments
@@ -2150,10 +2173,10 @@ class LiveView:
         if x >= width or not text:
             return x
         try:
-            self.screen.addstr(y, x, text[: width - x], attr)
+            self.screen.addstr(y, x, cut(text, width - x), attr)
         except curses.error:
             pass  # curses refuses the bottom-right cell; the text before it is drawn
-        return min(width, x + len(text))
+        return min(width, x + cells(text))
 
     def put_segments(self, y: int, segments: List[Segment], styles: Dict[str, int], fill: bool = False) -> None:
         x = 0
