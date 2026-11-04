@@ -886,6 +886,90 @@ class FilterTest(unittest.TestCase):
             portly.split_targets(["0"])
 
 
+class DownPortTest(unittest.TestCase):
+    """Stack wt1 of shop runs its web; its api and mail are down, and another
+    checkout holds its db port. wt kept a log for the api only."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tree = os.path.realpath(os.path.join(tmp.name, "trees", "fix-cart"))
+        os.makedirs(os.path.join(self.tree, "apps", "web"))
+        registry = os.path.join(tmp.name, "shop", ".git", "shop-worktrees")
+        os.makedirs(os.path.join(registry, "logs"))
+        self.log = os.path.join(registry, "logs", "1-api.log")
+        open(self.log, "w").close()
+        self.stack = portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111, "mail": 20112, "db": 20113},
+                                  registry)
+        self.tree_place = place(sub="apps/web", branch="fix/cart", is_worktree=True, top=self.tree)
+        web = listener(20110, 2, args="node x/node_modules/.bin/vite", cwd=self.tree + "/apps/web",
+                       place=self.tree_place)
+        web.stack = self.stack
+        blog = listener(20113, 5, args="postgres", cwd=HOME_DIR, place=place(repo="blog", top="/x/blog"))
+        self.rows = [web, blog]
+
+    def down(self):
+        return {item.port: item for item in portly.down_ports(self.rows)}
+
+    def test_adds_a_row_per_stack_port_nothing_listens_on(self):
+        found = [(item.port, portly.label(item), item.pid, item.is_down, item.place.sub, item.place.top, item.log)
+                 for item in portly.down_ports(self.rows)]
+        self.assertEqual(found, [(20111, "api", 0, True, "", self.tree, self.log),
+                                 (20112, "mail", 0, True, "", self.tree, "")])
+
+    def test_gives_a_stack_its_down_rows_once(self):
+        mail = listener(20112, 3, args="node mail.js", cwd=self.tree, place=self.tree_place)
+        mail.stack = self.stack
+        self.rows.append(mail)
+        self.assertEqual([item.port for item in portly.down_ports(self.rows)], [20111])
+
+    def test_lists_a_down_port_dim_under_its_worktree(self):
+        groups = portly.group_rows(portly.visible(portly.with_down_ports(self.rows), [], False))
+        lines = portly.render_groups(groups, portly.Paint(False), 120)
+        self.assertEqual([line.split() for line in lines], [
+            ["blog", "main", "/x/blog"],
+            ["20113", "postgres", "pid", "5"],
+            [],
+            ["shop", "wt", "fix/cart", portly.tilde(self.tree)],
+            ["20110", "vite", "apps/web", "pid", "2"],
+            ["20111", "api", "down"],
+            ["20112", "mail", "down"],
+        ])
+        [api] = [segments for item, _, segments in portly.group_lines(groups, 120) if item and item.port == 20111]
+        self.assertEqual([(text.strip(), tone) for text, tone in api if text.strip()],
+                         [("20111", portly.DIM), ("api", portly.DIM), ("down", portly.GONE)])
+        self.assertEqual(portly.ports_summary(groups), "2 ports in 2 projects, 2 down")
+
+    def test_a_filter_finds_a_down_port_by_its_role_or_stack(self):
+        rows = portly.with_down_ports(self.rows)
+        self.assertEqual([item.port for item in portly.visible(rows, ["api"], False)], [20111])
+        self.assertEqual([item.port for item in portly.visible(rows, ["wt1"], False)], [20110, 20111, 20112])
+
+    def test_a_down_row_is_no_parent_of_a_process_whose_ppid_is_0(self):
+        launchd = listener(22, 1, ppid=0, args="/sbin/launchd", cwd="/")
+        self.assertEqual(portly.drop_helpers([self.down()[20111], launchd]), [self.down()[20111], launchd])
+
+    def test_shows_a_down_port_without_a_process(self):
+        api, mail = self.down()[20111], self.down()[20112]
+        fields = {key: (value, tone, note) for key, value, tone, note in portly.detail_fields(api)}
+        self.assertEqual(list(fields), ["project", "stack", "state", "output"])
+        self.assertEqual(fields["stack"], ("wt 1 of shop", "", "api"))
+        self.assertEqual(fields["state"], ("down", portly.GONE, "nothing listens on it"))
+        self.assertEqual(fields["output"][0], portly.tilde(self.log))
+        self.assertEqual(portly.output_of(mail), "no log from wt")
+        self.assertEqual((portly.url_of(api), portly.hints_for(api), portly.hints_for(mail)),
+                         ("", ["portly logs 20111"], []))
+        self.assertEqual(portly.logs_command(api, 5, True), ["tail", "-n", "5", "-F", self.log])
+
+    def test_gives_a_down_port_as_json_without_process_fields(self):
+        data = json.loads(json.dumps(portly.as_json(self.down()[20111])))
+        self.assertEqual((data["down"], data["name"], data["stack"]["role"], data["log"]),
+                         (True, "api", "api", self.log))
+        self.assertEqual([data[key] for key in ("pid", "command", "cwd", "running_seconds", "memory_kb", "url")],
+                         [None] * 6)
+        self.assertFalse(portly.as_json(self.rows[0])["down"])
+
+
 class DockerTest(unittest.TestCase):
     def test_maps_published_tcp_ports_to_their_container(self):
         text = "\n".join([
@@ -1617,7 +1701,7 @@ class CommandTest(unittest.TestCase):
         [data] = json.loads(out)
         self.assertEqual((data["port"], data["pid"], data["cwd"]), (port, proc.pid, os.path.realpath(self.folder)))
         self.assertEqual(sorted(data), sorted([
-            "port", "name", "url", "addresses", "local_only", "project", "stack", "container", "pid",
+            "port", "name", "down", "url", "addresses", "local_only", "project", "stack", "container", "pid",
             "command", "cwd", "folder_gone", "running_seconds", "memory_kb", "others",
             "log", "parent", "connections", "restart", "restart_problem"]))
 

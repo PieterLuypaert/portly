@@ -40,7 +40,7 @@ import threading
 import time
 from collections import Counter
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Set, Tuple
 
 HOME = os.path.expanduser("~")
@@ -114,6 +114,7 @@ class Listener:
     rss_kb: int = 0
     cpu: str = ""
     others: List["Listener"] = field(default_factory=list)  # other servers on this port, beside this row
+    is_down: bool = False  # a wt stack's port that nothing listens on: no process, pid 0
     # Only read for the detail views (deep=True):
     parent: str = ""  # short command line of the parent
     log: str = ""  # the file its output goes to: stdout, or an open .log
@@ -547,10 +548,39 @@ def one_per_port(listeners: List[Listener]) -> List[Listener]:
     return kept
 
 
+def down_ports(rows: List[Listener]) -> List[Listener]:
+    """A row per port in a wt stack's registry that nothing listens on, such as
+    the api of a stack whose web still runs, in its worktree's group. Its
+    output is wt's log for that role. A stack where nothing runs has no row
+    to start from, so it gets none."""
+    listening = {item.port for item in rows}
+    seen: Set[Tuple[str, int]] = set()
+    down = []
+    for item in rows:
+        stack, place = item.stack, item.place
+        if not stack or not place or (stack.registry, stack.index) in seen:
+            continue
+        seen.add((stack.registry, stack.index))
+        for role, port in stack.ports.items():
+            if port in listening:
+                continue
+            log = os.path.join(stack.registry, "logs", f"{stack.index}-{role}.log")
+            down.append(Listener(port, 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
+                                 is_down=True, log=log if os.path.isfile(log) else ""))
+    return down
+
+
+def with_down_ports(rows: List[Listener]) -> List[Listener]:
+    """rows and the stack ports that are down, by port. Only for showing:
+    a down row has no process to stop or restart."""
+    return sorted(rows + down_ports(rows), key=lambda item: item.port)
+
+
 def drop_helpers(rows: List[Listener]) -> List[Listener]:
     """Drop a process whose parent listens too, such as php-fpm under the
-    symfony server: its port is internal."""
-    pids = {item.pid for item in rows}
+    symfony server: its port is internal. A down row's pid 0 is nobody's
+    parent, also not of a process whose ppid is 0, such as launchd."""
+    pids = {item.pid for item in rows if not item.is_down}
     return [item for item in rows if item.ppid not in pids]
 
 
@@ -813,7 +843,9 @@ def header_segments(group: Group, width: int) -> List[Segment]:
 
 def pid_text(item: Listener) -> str:
     """The pid column: pid 123, and +1 process when another server shares the port.
-    Docker's own pid says nothing about the container."""
+    Docker's own pid says nothing about the container; a down port has none."""
+    if item.is_down:
+        return "down"
     parts = [] if item.container else [f"pid {item.pid}"]
     if item.others:
         containers = all(other.container for other in item.others)
@@ -845,14 +877,16 @@ def group_lines(groups: List[Group], width: int) -> List[Line]:
             lines.append((None, None, []))
         lines.append((None, group, header_segments(group, width)))
         for item in group.rows:
-            segments = [("    ", ""), (str(item.port).rjust(port_w), BOLD),
-                        ("  ", ""), (clip(whats[item.port], what_w).ljust(what_w), "")]
+            tone = DIM if item.is_down else ""
+            segments = [("    ", ""), (str(item.port).rjust(port_w), tone or BOLD),
+                        ("  ", ""), (clip(whats[item.port], what_w).ljust(what_w), tone)]
             if where_w:
                 segments += [("  ", ""), (clip(wheres[item.port], where_w).ljust(where_w),
                                           GONE if is_orphan(item) else "")]
             if image_w:
                 segments += [("  ", ""), (clip(images[item.port], image_w).ljust(image_w), DIM)]
-            segments += [("  ", ""), (ages[item.port].rjust(age_w), DIM), ("  ", ""), (pids[item.port], DIM)]
+            segments += [("  ", ""), (ages[item.port].rjust(age_w), DIM),
+                         ("  ", ""), (pids[item.port], GONE if item.is_down else DIM)]
             lines.append((item, group, segments))
     return lines
 
@@ -920,6 +954,8 @@ LOOPBACK = re.compile(r"127\.[\d.]+|\[::1\]|localhost")
 
 
 def url_of(item: Listener) -> str:
+    if item.is_down:
+        return ""
     inner = item.container.inner.get(item.port) if item.container else None
     if item.port in NOT_HTTP or inner in NOT_HTTP:
         return ""
@@ -936,6 +972,8 @@ def output_of(item: Listener) -> str:
     """Where a process's output goes."""
     if item.log:
         return tilde(item.log)
+    if item.is_down:
+        return "no log from wt"
     if has_terminal(item.tty):
         return f"terminal {item.tty}"
     return "no terminal or log file"
@@ -954,6 +992,10 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
     if item.stack:
         role = next((role for role, port in item.stack.ports.items() if port == item.port), "")
         add("stack", f"wt {item.stack.index} of {item.stack.name}", note=role)
+    if item.is_down:
+        add("state", "down", GONE, "nothing listens on it")
+        add("output", output_of(item))
+        return fields
     if item.container:
         c = item.container
         add("container", c.name)
@@ -995,6 +1037,8 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
 
 
 def hints_for(item: Listener) -> List[str]:
+    if item.is_down:
+        return [f"portly logs {item.port}"] if item.log else []
     hints = []
     if url_of(item):
         hints.append(f"portly open {item.port}")
@@ -1453,11 +1497,14 @@ def port_number(text: str) -> int:
 
 
 def as_json(item: Listener) -> dict:
-    """One port as plain data; fields that do not apply are null."""
+    """One port as plain data; fields that do not apply are null. A down port
+    has no process, so no process fields, and gives wt's log."""
     place, stack, container = item.place, item.stack, item.container
+    process = not container and not item.is_down
     data = {
         "port": item.port,
         "name": label(item),
+        "down": item.is_down,
         "url": url_of(item) or None,
         "addresses": item.addresses,
         "local_only": is_local_only(item),
@@ -1469,15 +1516,17 @@ def as_json(item: Listener) -> dict:
                                     "status": container.status, "compose_project": container.project or None,
                                     "service": container.service or None,
                                     "inner_port": container.inner.get(item.port)},
-        "pid": None if container else item.pid,
-        "command": None if container else item.args,
-        "cwd": None if container else item.cwd,
+        "pid": item.pid if process else None,
+        "command": item.args if process else None,
+        "cwd": item.cwd if process else None,
         "folder_gone": is_orphan(item),
-        "running_seconds": None if container else etime_seconds(item.elapsed),
-        "memory_kb": None if container else item.rss_kb,
+        "running_seconds": etime_seconds(item.elapsed) if process else None,
+        "memory_kb": item.rss_kb if process else None,
         "others": [as_json(other) for other in item.others],
     }
-    if item.connections >= 0:
+    if item.is_down:
+        data["log"] = item.log or None
+    elif item.connections >= 0:
         plan = item.restart
         data.update(log=item.log or None, parent=item.parent or None, connections=item.connections,
                     restart=plan and {"command": plan.argv, "cwd": plan.cwd, "log": plan.log, "env": plan.env},
@@ -1504,6 +1553,14 @@ def visible(rows: List[Listener], terms: List[str], show_all: bool) -> List[List
         return dev
     found = [item for item in dev if matches(item, terms)]
     return found or [item for item in rows if matches(item, terms)]
+
+
+def ports_summary(groups: List[Group]) -> str:
+    """4 ports in 2 projects, and 1 down when a stack port is."""
+    rows = [item for group in groups for item in group.rows]
+    down = sum(1 for item in rows if item.is_down)
+    text = f"{plural(len(rows) - down, 'port', 'ports')} in {plural(len(groups), 'project', 'projects')}"
+    return text + (f", {down} down" if down else "")
 
 
 def show_list(rows: List[Listener], terms: List[str], show_all: bool, paint: Paint) -> int:
