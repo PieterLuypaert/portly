@@ -1133,8 +1133,8 @@ def docker(args: List[str], timeout: float) -> subprocess.CompletedProcess:
 
 def send(pid: int, sig: int) -> Optional[str]:
     """Signal pid; a reason when that is not allowed. A pid that is already
-    gone is fine: it was going to stop anyway. Pid 0 and below signal whole
-    process groups and pid 1 is the system's own, such as a down row's 0."""
+    gone is fine: it was going to stop anyway. Pid 0 and -1 signal whole
+    groups of processes, and pid 1 is launchd or init. A down row has pid 0."""
     if pid <= 1:
         return f"refused to signal pid {pid}"
     try:
@@ -1880,7 +1880,7 @@ class LiveView:
             if not running:  # a filter can leave only down rows
                 self.say(f"nothing runs in {name} to {action}", DIM)
                 return
-            self.confirm =(f"{verb} {plural(len(running), 'port', 'ports')} of {name}?", running, action)
+            self.confirm = (f"{verb} {plural(len(running), 'port', 'ports')} of {name}?", running, action)
         else:
             command = short_command(" ".join(item.restart.argv)) if item.restart else ""
             plan = f" with {command}" if command else ""
