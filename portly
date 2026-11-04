@@ -22,6 +22,7 @@ of its own next to the main checkout of its repo. A port that Docker forwards
 is named after its container and belongs to the checkout of its compose
 project, except a stack that wt started (compose project <name>-wt<n>): that
 belongs to its worktree, found in wt's registry, .git/<name>-worktrees/<n>.env.
+A port of such a stack that nothing listens on shows as down, with wt's log.
 Colour is dropped with NO_COLOR or when the output is not a terminal.
 """
 import argparse
@@ -1575,8 +1576,8 @@ def show_list(rows: List[Listener], terms: List[str], show_all: bool, paint: Pai
     groups = group_rows(rows)
     print("\n" + "\n".join(render_groups(groups, paint, width)) + "\n")
     if sys.stdout.isatty():
-        summary = f"{plural(len(rows), 'port', 'ports')} in {plural(len(groups), 'project', 'projects')}"
-        print(f"  {paint(DIM, summary + '  ·  portly 3000 for details  ·  portly for the interactive view')}\n")
+        hint = "  ·  portly 3000 for details  ·  portly for the interactive view"
+        print(f"  {paint(DIM, ports_summary(groups) + hint)}\n")
     return 0
 
 
@@ -1603,7 +1604,7 @@ class Scanner(threading.Thread):
     def run(self) -> None:
         while True:
             try:
-                rows = one_per_port(read_listeners(deep=True))
+                rows = with_down_ports(one_per_port(read_listeners(deep=True)))
             except Exception as error:  # the view stays up and shows what went wrong
                 with self.lock:
                     self.error = f"scan failed: {error}"
@@ -1855,13 +1856,20 @@ class LiveView:
                 self.say("still busy, one stop or restart at a time", DIM)
                 return
         verb = "Stop" if action == "stop" else "Restart"
+        if item.is_down and not whole_group:
+            self.say(f"{item.port} {label(item)} is down: nothing runs to {action}", DIM)
+            return
         if action == "restart" and not whole_group and not (item.container or item.restart):
             self.say(f"{item.port} cannot restart: {item.restart_problem or 'no restart plan'}", DIM)
             return
         if whole_group:
             branch = branch_text(group.branch, group.is_worktree)
             name = f"{group.title} {branch}".strip()
-            self.confirm = (f"{verb} {plural(len(group.rows), 'port', 'ports')} of {name}?", list(group.rows), action)
+            running = [row for row in group.rows if not row.is_down]
+            if not running:  # a filter can leave only down rows
+                self.say(f"nothing runs in {name} to {action}", DIM)
+                return
+            self.confirm =(f"{verb} {plural(len(running), 'port', 'ports')} of {name}?", running, action)
         else:
             command = short_command(" ".join(item.restart.argv)) if item.restart else ""
             plan = f" with {command}" if command else ""
@@ -2003,7 +2011,8 @@ class LiveView:
         item = self.current()
         possible = {"o": bool(item and url_of(item)), "c": bool(item and url_of(item)),
                     "r": bool(item and (item.container or item.restart)),
-                    "l": bool(item and (item.container or item.log)), "k": bool(item and not is_docker_itself(item)), "K": bool(item)}
+                    "l": bool(item and (item.container or item.log)),
+                    "k": bool(item and not item.is_down and not is_docker_itself(item)), "K": bool(item)}
         segments: List[Segment] = [(" ", "")]
         for key, what in self.KEYS:
             on = possible.get(key, True)
@@ -2011,8 +2020,7 @@ class LiveView:
         return segments, False
 
     def title_segments(self, width: int) -> Tuple[List[Segment], List[Segment]]:
-        rows = sum(len(group.rows) for group in self.groups)
-        left = [("  ", DIM), (f"{plural(rows, 'port', 'ports')} in {plural(len(self.groups), 'project', 'projects')}", DIM)]
+        left = [("  ", DIM), (ports_summary(self.groups), DIM)]
         right: List[Segment] = []
         if self.filter:
             right += [("/", ACCENT), (self.filter, BOLD), ("  ", "")]
@@ -2164,7 +2172,7 @@ def cmd_show(argv: List[str]) -> int:
     if rest:
         parser.error(f"unrecognized arguments: {' '.join(rest)}")
     ports, terms = targets_of(parser, args.targets)
-    rows = one_per_port(read_listeners(deep=bool(ports)))
+    rows = with_down_ports(one_per_port(read_listeners(deep=bool(ports))))
     if args.json:
         chosen = [item for item in rows if item.port in ports] if ports else visible(rows, terms, args.all)
         print(json.dumps([as_json(item) for item in chosen], indent=2, ensure_ascii=False))
@@ -2244,7 +2252,8 @@ def cmd_logs(argv: List[str]) -> int:
     parser.add_argument("--no-follow", action="store_true", help="show the lines and stop")
     args = parser.parse_args(argv)
     paint = paint_for_stdout()
-    item = next((row for row in one_per_port(read_listeners(deep=True)) if row.port == args.port), None)
+    item = next((row for row in with_down_ports(one_per_port(read_listeners(deep=True)))
+                 if row.port == args.port), None)
     if not item:
         print(f"\n  {paint(BOLD, str(args.port))} is not listening.\n")
         return 1

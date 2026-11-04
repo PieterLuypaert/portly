@@ -969,6 +969,40 @@ class DownPortTest(unittest.TestCase):
                          [None] * 6)
         self.assertFalse(portly.as_json(self.rows[0])["down"])
 
+    def view(self):
+        view = portly.LiveView(None, FakeScanner(portly.with_down_ports(self.rows)), [], False)
+        view.pull()
+        self.acted = []
+        view.run_in_background = lambda action, targets: self.acted.append((action, [i.port for i in targets]))
+        return view
+
+    def test_the_live_view_stops_and_restarts_no_down_port(self):
+        view = self.view()
+        for key in ("down", "down"):
+            view.handle(key)
+        self.assertEqual(view.selected, 20111)
+        view.handle("k")
+        self.assertEqual((view.confirm, view.message), (None, "20111 api is down: nothing runs to stop"))
+        view.handle("r")
+        self.assertEqual((view.confirm, view.message), (None, "20111 api is down: nothing runs to restart"))
+        view.message = ""
+        footer = dict((text, tone) for text, tone in view.footer_segments(200)[0])
+        self.assertEqual((footer["k"], footer["r"], footer["l"], footer["o"]),
+                         (portly.DIM, portly.DIM, portly.ACCENT, portly.DIM))
+        self.assertEqual(view.title_segments(200)[0][1][0], "2 ports in 2 projects, 2 down")
+        view.handle("K")
+        self.assertEqual(view.confirm[0], "Stop 1 port of shop wt fix/cart?")
+        view.handle("y")
+        self.assertEqual(self.acted, [("stop", [20110])])
+
+    def test_the_live_view_has_nothing_to_stop_when_a_filter_leaves_only_down_ports(self):
+        view = self.view()
+        for key in ("/", "m", "a", "i", "l", "enter", "R"):
+            view.handle(key)
+        self.assertEqual((view.order, view.confirm, view.message),
+                         ([20112], None, "nothing runs in shop wt fix/cart to restart"))
+        self.assertEqual(self.acted, [])
+
 
 class DockerTest(unittest.TestCase):
     def test_maps_published_tcp_ports_to_their_container(self):
@@ -1658,13 +1692,14 @@ class CommandTest(unittest.TestCase):
         self.addCleanup(setattr, portly.os, "execvp", portly.os.execvp)
         portly.os.execvp = lambda file, args: self.ran.append(args)  # logs would replace the test run
 
-    def serve(self, log=False):
-        """A throwaway server; its output goes to out.log, or nowhere."""
+    def serve(self, log=False, cwd=""):
+        """A throwaway server, run from cwd or the test's folder; its output goes to out.log, or nowhere."""
         port = unused_port()
         output = open(os.path.join(self.folder, "out.log"), "w") if log else subprocess.DEVNULL
         if log:
             self.addCleanup(output.close)
-        proc = subprocess.Popen([sys.executable, "server.py", str(port)], cwd=self.folder,
+        proc = subprocess.Popen([sys.executable, os.path.join(self.folder, "server.py"), str(port)],
+                                cwd=cwd or self.folder,
                                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
         self.addCleanup(proc.wait)
         self.addCleanup(proc.kill)
@@ -1809,6 +1844,35 @@ class CommandTest(unittest.TestCase):
         self.assertIn("does not write to a file", out)
         self.assertEqual(self.call("logs", str(unused_port()))[0], 1)
         self.assertEqual(self.ran, [])
+
+    def test_a_wt_stack_port_that_is_down_shows_with_its_log(self):
+        repo, tree = os.path.join(self.folder, "shop"), os.path.join(self.folder, "trees", "fix-cart")
+        os.makedirs(repo)
+        git("init", "-q", "-b", "main", cwd=repo)
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+        git("worktree", "add", "-q", "-b", "fix/cart", tree, cwd=repo)
+        _, web = self.serve(cwd=tree)
+        api = unused_port()
+        registry = os.path.realpath(os.path.join(repo, ".git", "shop-worktrees"))
+        os.makedirs(os.path.join(registry, "logs"))
+        with open(os.path.join(registry, "1.env"), "w") as entry:
+            entry.write(f"REG_BRANCH=fix/cart\nREG_PATH={tree}\nREG_PORTS=web={web} api={api}\n")
+        log = os.path.join(registry, "logs", "1-api.log")
+        with open(log, "w") as lines:
+            lines.write("api crashed\n")
+        code, out, _ = self.call("list", self.word)
+        self.assertEqual(code, 0)
+        self.assertIn([str(api), "api", "down"], [line.split() for line in out.splitlines()])
+        code, out, _ = self.call(str(api))
+        self.assertIn("nothing listens on it", out)
+        self.assertIn("portly logs", out)
+        [data] = [item for item in json.loads(self.call("--json", self.word)[1]) if item["port"] == api]
+        self.assertEqual((data["down"], data["pid"], data["log"]), (True, None, log))
+        self.assertEqual(self.call("logs", str(api), "-n", "5")[0], 0)
+        self.assertEqual(self.ran, [["tail", "-n", "5", "-F", log]])
+        code, out, _ = self.call("kill", str(api))
+        self.assertEqual(code, 0)
+        self.assertIn("already free", out)
 
     def test_free_skips_a_taken_port(self):
         _, port = self.serve()
