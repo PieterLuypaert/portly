@@ -2110,23 +2110,28 @@ class LiveView:
             return [(f" {frame} ", ACCENT), (busy, ""), ("  ", "")] + said, False
         if said:
             return said, False
+        if self.showing_keys:
+            return [(" any key closes this", DIM)], False
+        group = self.current_group()
+        possible = self.possible_keys()
         segments: List[Segment] = [(" ", "")]
         for key, what in self.KEYS:
-            if self.can_press(key):
+            if key == "RK" and group and not group_stack(group):
+                what = "project"
+            if key in possible:
                 segments += [(key, ACCENT), (f" {what}  ", DIM)]
         return segments, False
 
-    def can_press(self, key: str) -> bool:
-        """Whether a key of the key row does something for the selected row."""
+    def possible_keys(self) -> Set[str]:
+        """The keys of the key row that do something for the selected row."""
         item, group = self.current(), self.current_group()
-        if key == "?":
-            return True
         if not item or not group:
-            return False
-        return {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log),
-                "r": bool(item.container or item.restart),
-                "k": not item.is_down and not is_docker_itself(item),
-                "RK": any(not row.is_down for row in group.rows)}[key]
+            return {"?"}
+        checks = {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log),
+                  "r": bool(item.container or item.restart),
+                  "k": not item.is_down and not is_docker_itself(item),
+                  "RK": any(not row.is_down for row in group.rows), "?": True}
+        return {key for key, on in checks.items() if on}
 
     def keys_lines(self) -> List[List[Segment]]:
         key_w = max(len(key) for key, _ in self.ALL_KEYS) + 3
@@ -2167,7 +2172,7 @@ class LiveView:
             self.row_at = {}
             for offset, segments in enumerate(self.keys_lines()[: height - 3]):
                 self.put_segments(2 + offset, segments, styles.normal)
-            self.put_segments(height - 1, [(" any key closes this", DIM)], styles.normal)
+            self.put_segments(height - 1, self.footer_segments(width)[0], styles.normal)
             screen.refresh()
             return
 

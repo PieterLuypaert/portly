@@ -229,6 +229,7 @@ class LiveViewTest(unittest.TestCase):
         self.view.pull()
         self.view.selected = 5432
         self.assertEqual(self.keys(), ["↑↓", "k", "RK", "?"])
+        self.assertIn("RK project", "".join(text for text, _ in self.view.footer_segments(200)[0]))
 
     def test_question_mark_lists_every_key_until_the_next_key(self):
         stopped = []
@@ -243,6 +244,16 @@ class LiveViewTest(unittest.TestCase):
         self.assertFalse(self.view.showing_keys)
         self.assertFalse(self.view.handle("q"))
         self.assertEqual(stopped, [])
+
+    def test_the_key_list_keeps_a_running_stop_and_its_outcome_in_sight(self):
+        self.press("?")
+        footer = lambda: "".join(text for text, _ in self.view.footer_segments(200)[0])
+        self.assertEqual(footer(), " any key closes this")
+        self.view.busy = "stopping 3000"
+        self.assertIn("stopping 3000", footer())
+        self.view.busy = ""
+        self.view.say("3000 is free")
+        self.assertEqual(footer(), " 3000 is free")
 
     def test_says_when_no_browser_opener_is_found(self):
         self.addCleanup(setattr, portly, "opener", portly.opener)
@@ -1127,6 +1138,7 @@ class DownPortTest(unittest.TestCase):
         view.message = ""
         keys = [text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT]
         self.assertEqual(keys, ["↑↓", "l", "RK", "?"])
+        self.assertIn("RK stack", "".join(text for text, _ in view.footer_segments(200)[0]))
         self.assertEqual(view.title_segments(200)[0][1:], portly.summary_segments(view.groups))
         view.handle("K")
         self.assertEqual(view.confirm[0], "Stop 1 port of shop wt fix/cart?")
