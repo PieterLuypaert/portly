@@ -1023,7 +1023,8 @@ class DownPortTest(unittest.TestCase):
         [api] = [segments for item, _, segments in portly.group_lines(groups, 120) if item and item.port == 20111]
         self.assertEqual([(text.strip(), tone) for text, tone in api if text.strip()],
                          [("20111", portly.DIM), ("api", portly.DIM), ("✗", portly.GONE)])
-        self.assertEqual(portly.ports_summary(groups), "2 ports in 2 projects, 2 down")
+        self.assertEqual(portly.summary_segments(groups), [("2 projects · 2 ports", portly.DIM), (" · ", portly.DIM),
+                                                           ("2 down", portly.GONE)])
 
     def test_a_filter_finds_a_down_port_by_its_role_or_stack(self):
         rows = portly.with_down_ports(self.rows)
@@ -1075,7 +1076,7 @@ class DownPortTest(unittest.TestCase):
         footer = dict((text, tone) for text, tone in view.footer_segments(200)[0])
         self.assertEqual((footer["k"], footer["r"], footer["l"], footer["o"]),
                          (portly.DIM, portly.DIM, portly.ACCENT, portly.DIM))
-        self.assertEqual(view.title_segments(200)[0][1][0], "2 ports in 2 projects, 2 down")
+        self.assertEqual(view.title_segments(200)[0][1:], portly.summary_segments(view.groups))
         view.handle("K")
         self.assertEqual(view.confirm[0], "Stop 1 port of shop wt fix/cart?")
         view.handle("y")

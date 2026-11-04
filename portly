@@ -1619,12 +1619,12 @@ def visible(rows: List[Listener], terms: List[str], show_all: bool) -> List[List
     return found or [item for item in rows if matches(item, terms)]
 
 
-def ports_summary(groups: List[Group]) -> str:
-    """4 ports in 2 projects, and 1 down when a stack port is."""
+def summary_segments(groups: List[Group]) -> List[Segment]:
+    """2 projects · 4 ports, and · 1 down in red when a stack port is."""
     rows = [item for group in groups for item in group.rows]
     down = sum(1 for item in rows if item.is_down)
-    text = f"{plural(len(rows) - down, 'port', 'ports')} in {plural(len(groups), 'project', 'projects')}"
-    return text + (f", {down} down" if down else "")
+    segments = [(f"{plural(len(groups), 'project', 'projects')} · {plural(len(rows) - down, 'port', 'ports')}", DIM)]
+    return segments + ([(" · ", DIM), (f"{down} down", GONE)] if down else [])
 
 
 def show_list(rows: List[Listener], terms: List[str], show_all: bool, paint: Paint) -> int:
@@ -1640,7 +1640,7 @@ def show_list(rows: List[Listener], terms: List[str], show_all: bool, paint: Pai
     print("\n" + "\n".join(render_groups(groups, paint, width)) + "\n")
     if sys.stdout.isatty():
         hint = "  ·  portly 3000 for details  ·  portly for the interactive view"
-        print(f"  {paint(DIM, ports_summary(groups) + hint)}\n")
+        print(f"  {to_ansi(summary_segments(groups), paint)}{paint(DIM, hint)}\n")
     return 0
 
 
@@ -2083,7 +2083,7 @@ class LiveView:
         return segments, False
 
     def title_segments(self, width: int) -> Tuple[List[Segment], List[Segment]]:
-        left = [("  ", DIM), (ports_summary(self.groups), DIM)]
+        left = [("  ", DIM)] + summary_segments(self.groups)
         right: List[Segment] = []
         if self.filter:
             right += [("/", ACCENT), (self.filter, BOLD), ("  ", "")]
