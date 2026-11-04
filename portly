@@ -74,6 +74,13 @@ class Stack:
     def role_of(self, port: int) -> str:
         return next((role for role, value in self.ports.items() if value == port), "")
 
+    def pid_file(self, role: str) -> str:
+        """wt writes it when it starts the role's server and removes it when it stops it."""
+        return os.path.join(self.registry, f"{self.index}-{role}.pid")
+
+    def log_file(self, role: str) -> str:
+        return os.path.join(self.registry, "logs", f"{self.index}-{role}.log")
+
 
 @dataclass
 class Restart:
@@ -451,7 +458,7 @@ def plan_restart(item: Listener, procs: Dict[int, Tuple[int, str]],
         return None, f"cannot find its start command: {short_command(args)}"
     pidfile = ""
     if item.stack and item.stack.registry:
-        candidate = os.path.join(item.stack.registry, f"{item.stack.index}-{item.stack.role_of(item.port)}.pid")
+        candidate = item.stack.pid_file(item.stack.role_of(item.port))
         pidfile = candidate if os.path.exists(candidate) else ""
     # Output already going to a file means it ran in the background anyway.
     terminal = item.tty if has_terminal(item.tty) and not item.stdout else ""
@@ -550,11 +557,14 @@ def one_per_port(listeners: List[Listener]) -> List[Listener]:
 
 
 def down_ports(rows: List[Listener]) -> List[Listener]:
-    """A row per port in a wt stack's registry that nothing listens on, such as
-    the api of a stack whose web still runs, in its worktree's group. Its
-    output is wt's log for that role. A stack where nothing runs has no row
-    to start from, so it gets none."""
-    listening = {item.port for item in rows}
+    """A row per port of a wt stack that wt started a server for, but that
+    nothing listens on, such as the api of a stack whose web still runs, in
+    its worktree's group. wt's pid file tells it started one and has not
+    stopped it: the registry lists a port for every service, also those wt
+    starts no server for, such as a container's. The row's output is wt's
+    log for that role. A stack where nothing runs has no row to start from,
+    so it gets none."""
+    taken = {item.port for item in rows}
     seen: Set[Tuple[str, int]] = set()
     down = []
     for item in rows:
@@ -563,9 +573,10 @@ def down_ports(rows: List[Listener]) -> List[Listener]:
             continue
         seen.add((stack.registry, stack.index))
         for role, port in stack.ports.items():
-            if port in listening:
+            if port in taken or not os.path.isfile(stack.pid_file(role)):
                 continue
-            log = os.path.join(stack.registry, "logs", f"{stack.index}-{role}.log")
+            taken.add(port)  # two stacks on the same ports: rows are told apart by port
+            log = stack.log_file(role)
             down.append(Listener(port, 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
                                  is_down=True, log=log if os.path.isfile(log) else ""))
     return down

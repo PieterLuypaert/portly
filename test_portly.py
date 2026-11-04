@@ -888,7 +888,8 @@ class FilterTest(unittest.TestCase):
 
 class DownPortTest(unittest.TestCase):
     """Stack wt1 of shop runs its web; its api and mail are down, and another
-    checkout holds its db port. wt kept a log for the api only."""
+    checkout holds its db port. wt started a server for web, api and mail,
+    not for debug, and kept a log for the api only."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -899,8 +900,10 @@ class DownPortTest(unittest.TestCase):
         os.makedirs(os.path.join(registry, "logs"))
         self.log = os.path.join(registry, "logs", "1-api.log")
         open(self.log, "w").close()
-        self.stack = portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111, "mail": 20112, "db": 20113},
-                                  registry)
+        self.stack = portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111, "mail": 20112, "db": 20113,
+                                                         "debug": 20114}, registry)
+        for role in ("web", "api", "mail", "db"):
+            open(self.stack.pid_file(role), "w").close()
         self.tree_place = place(sub="apps/web", branch="fix/cart", is_worktree=True, top=self.tree)
         web = listener(20110, 2, args="node x/node_modules/.bin/vite", cwd=self.tree + "/apps/web",
                        place=self.tree_place)
@@ -922,6 +925,18 @@ class DownPortTest(unittest.TestCase):
         mail.stack = self.stack
         self.rows.append(mail)
         self.assertEqual([item.port for item in portly.down_ports(self.rows)], [20111])
+
+    def test_a_port_wt_runs_no_server_on_or_stopped_is_not_down(self):
+        os.remove(self.stack.pid_file("mail"))
+        self.assertEqual([item.port for item in portly.down_ports(self.rows)], [20111])
+
+    def test_two_stacks_on_the_same_ports_give_a_down_port_one_row(self):
+        twin = portly.Stack("shop", 2, self.tree, {"web": 20115, "api": 20111}, self.stack.registry)
+        open(twin.pid_file("api"), "w").close()
+        other = listener(20115, 6, args="node server.js", cwd=self.tree, place=self.tree_place)
+        other.stack = twin
+        self.rows.append(other)
+        self.assertEqual([item.port for item in portly.down_ports(self.rows)], [20111, 20112])
 
     def test_lists_a_down_port_dim_under_its_worktree(self):
         groups = portly.group_rows(portly.visible(portly.with_down_ports(self.rows), [], False))
@@ -1857,6 +1872,8 @@ class CommandTest(unittest.TestCase):
         os.makedirs(os.path.join(registry, "logs"))
         with open(os.path.join(registry, "1.env"), "w") as entry:
             entry.write(f"REG_BRANCH=fix/cart\nREG_PATH={tree}\nREG_PORTS=web={web} api={api}\n")
+        for role in ("web", "api"):
+            open(os.path.join(registry, f"1-{role}.pid"), "w").close()
         log = os.path.join(registry, "logs", "1-api.log")
         with open(log, "w") as lines:
             lines.write("api crashed\n")
