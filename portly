@@ -562,7 +562,7 @@ def one_per_port(listeners: List[Listener]) -> List[Listener]:
 
 # Colour and cursor codes a dev server writes to its log (CSI, OSC such as a
 # window title, other escapes), and the other control characters.
-TERMINAL_CODES = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+TERMINAL_CODES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]"
                             r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
                             r"|\x1b[@-_]"
                             r"|[\x00-\x08\x0b-\x1f\x7f]")
@@ -580,7 +580,7 @@ def last_lines(path: str, count: int) -> List[str]:
             lines = log.read().decode("utf-8", errors="replace").split("\n")
     except OSError:
         return []
-    if size > TAIL_BYTES:
+    if size > TAIL_BYTES and len(lines) > 1:
         lines = lines[1:]  # the read began inside this one
     shown = (TERMINAL_CODES.sub("", line.rstrip("\r").rpartition("\r")[2]).replace("\t", " ").strip()
              for line in lines)
@@ -607,10 +607,9 @@ def down_ports(rows: List[Listener]) -> List[Listener]:
             if port in taken or not os.path.isfile(stack.pid_file(role)):
                 continue
             taken.add(port)  # two stacks on the same ports: rows are told apart by port
-            log = stack.log_file(role)
+            log = stack.log_file(role) if os.path.isfile(stack.log_file(role)) else ""
             down.append(Listener(port, 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
-                                 is_down=True, log=log if os.path.isfile(log) else "",
-                                 last_output=last_lines(log, 10)))
+                                 is_down=True, log=log, last_output=last_lines(log, 10) if log else []))
     return down
 
 

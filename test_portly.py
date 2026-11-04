@@ -1040,6 +1040,15 @@ class LastLinesTest(unittest.TestCase):
         self.assertEqual(portly.last_lines(path, 10), ["last"])
         self.assertEqual(portly.last_lines(path + ".gone", 10), [])
 
+    def test_keeps_the_end_of_a_last_line_longer_than_what_it_reads(self):
+        path = self.write(b"start\n" + b"x" * portly.TAIL_BYTES + b" Error: out of memory")
+        [line] = portly.last_lines(path, 10)
+        self.assertTrue(line.endswith("x Error: out of memory"))
+
+    def test_strips_colour_codes_in_every_form(self):
+        path = self.write(b"\x1b[38:2:255:0:0mError\x1b[0m \x1b[4:3mcurly\x1b[24m \x1b[>4;2mkeys\n")
+        self.assertEqual(portly.last_lines(path, 1), ["Error curly keys"])
+
 
 class DownPortTest(unittest.TestCase):
     """Stack wt1 of shop runs its web; its api and mail are down, and another
