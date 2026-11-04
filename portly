@@ -1077,7 +1077,10 @@ def docker(args: List[str], timeout: float) -> subprocess.CompletedProcess:
 
 def send(pid: int, sig: int) -> Optional[str]:
     """Signal pid; a reason when that is not allowed. A pid that is already
-    gone is fine: it was going to stop anyway."""
+    gone is fine: it was going to stop anyway. Pid 0 and below signal whole
+    process groups and pid 1 is the system's own, such as a down row's 0."""
+    if pid <= 1:
+        return f"refused to signal pid {pid}"
     try:
         os.kill(pid, sig)
     except ProcessLookupError:

@@ -982,6 +982,11 @@ class DetailTest(unittest.TestCase):
 
 
 class StopTest(unittest.TestCase):
+    def test_never_signals_pid_0_or_1(self):
+        """0 and -1 signal whole process groups; a down row has pid 0."""
+        for pid in (-1, 0, 1):
+            self.assertEqual(_real_send(pid, 0), f"refused to signal pid {pid}")
+
     def serve(self, ignore_term, host="127.0.0.1", port=0, worker=False):
         """A throwaway listener, on a free port unless one is given; returns
         the process and port. It runs from node_modules/.bin/vite, so portly
