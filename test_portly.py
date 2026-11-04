@@ -886,6 +886,140 @@ class FilterTest(unittest.TestCase):
             portly.split_targets(["0"])
 
 
+class DownPortTest(unittest.TestCase):
+    """Stack wt1 of shop runs its web; its api and mail are down, and another
+    checkout holds its db port. wt started a server for web, api and mail,
+    not for debug, and kept a log for the api only."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tree = os.path.realpath(os.path.join(tmp.name, "trees", "fix-cart"))
+        os.makedirs(os.path.join(self.tree, "apps", "web"))
+        registry = os.path.join(tmp.name, "shop", ".git", "shop-worktrees")
+        os.makedirs(os.path.join(registry, "logs"))
+        self.log = os.path.join(registry, "logs", "1-api.log")
+        open(self.log, "w").close()
+        self.stack = portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111, "mail": 20112, "db": 20113,
+                                                         "debug": 20114}, registry)
+        for role in ("web", "api", "mail", "db"):
+            open(self.stack.pid_file(role), "w").close()
+        self.tree_place = place(sub="apps/web", branch="fix/cart", is_worktree=True, top=self.tree)
+        web = listener(20110, 2, args="node x/node_modules/.bin/vite", cwd=self.tree + "/apps/web",
+                       place=self.tree_place)
+        web.stack = self.stack
+        blog = listener(20113, 5, args="postgres", cwd=HOME_DIR, place=place(repo="blog", top="/x/blog"))
+        self.rows = [web, blog]
+
+    def down(self):
+        return {item.port: item for item in portly.down_ports(self.rows)}
+
+    def test_adds_a_row_per_stack_port_nothing_listens_on(self):
+        found = [(item.port, portly.label(item), item.pid, item.is_down, item.place.sub, item.place.top, item.log)
+                 for item in portly.down_ports(self.rows)]
+        self.assertEqual(found, [(20111, "api", 0, True, "", self.tree, self.log),
+                                 (20112, "mail", 0, True, "", self.tree, "")])
+
+    def test_gives_a_stack_its_down_rows_once(self):
+        mail = listener(20112, 3, args="node mail.js", cwd=self.tree, place=self.tree_place)
+        mail.stack = self.stack
+        self.rows.append(mail)
+        self.assertEqual([item.port for item in portly.down_ports(self.rows)], [20111])
+
+    def test_a_port_wt_runs_no_server_on_or_stopped_is_not_down(self):
+        os.remove(self.stack.pid_file("mail"))
+        self.assertEqual([item.port for item in portly.down_ports(self.rows)], [20111])
+
+    def test_two_stacks_on_the_same_ports_give_a_down_port_one_row(self):
+        twin = portly.Stack("shop", 2, self.tree, {"web": 20115, "api": 20111}, self.stack.registry)
+        open(twin.pid_file("api"), "w").close()
+        other = listener(20115, 6, args="node server.js", cwd=self.tree, place=self.tree_place)
+        other.stack = twin
+        self.rows.append(other)
+        self.assertEqual([item.port for item in portly.down_ports(self.rows)], [20111, 20112])
+
+    def test_lists_a_down_port_dim_under_its_worktree(self):
+        groups = portly.group_rows(portly.visible(portly.with_down_ports(self.rows), [], False))
+        lines = portly.render_groups(groups, portly.Paint(False), 120)
+        self.assertEqual([line.split() for line in lines], [
+            ["blog", "main", "/x/blog"],
+            ["20113", "postgres", "pid", "5"],
+            [],
+            ["shop", "wt", "fix/cart", portly.tilde(self.tree)],
+            ["20110", "vite", "apps/web", "pid", "2"],
+            ["20111", "api", "down"],
+            ["20112", "mail", "down"],
+        ])
+        [api] = [segments for item, _, segments in portly.group_lines(groups, 120) if item and item.port == 20111]
+        self.assertEqual([(text.strip(), tone) for text, tone in api if text.strip()],
+                         [("20111", portly.DIM), ("api", portly.DIM), ("down", portly.GONE)])
+        self.assertEqual(portly.ports_summary(groups), "2 ports in 2 projects, 2 down")
+
+    def test_a_filter_finds_a_down_port_by_its_role_or_stack(self):
+        rows = portly.with_down_ports(self.rows)
+        self.assertEqual([item.port for item in portly.visible(rows, ["api"], False)], [20111])
+        self.assertEqual([item.port for item in portly.visible(rows, ["wt1"], False)], [20110, 20111, 20112])
+
+    def test_a_down_row_is_no_parent_of_a_process_whose_ppid_is_0(self):
+        launchd = listener(22, 1, ppid=0, args="/sbin/launchd", cwd="/")
+        self.assertEqual(portly.drop_helpers([self.down()[20111], launchd]), [self.down()[20111], launchd])
+
+    def test_shows_a_down_port_without_a_process(self):
+        api, mail = self.down()[20111], self.down()[20112]
+        fields = {key: (value, tone, note) for key, value, tone, note in portly.detail_fields(api)}
+        self.assertEqual(list(fields), ["project", "stack", "state", "output"])
+        self.assertEqual(fields["stack"], ("wt 1 of shop", "", "api"))
+        self.assertEqual(fields["state"], ("down", portly.GONE, "nothing listens on it"))
+        self.assertEqual(fields["output"][0], portly.tilde(self.log))
+        self.assertEqual(portly.output_of(mail), "no log from wt")
+        self.assertEqual((portly.url_of(api), portly.hints_for(api), portly.hints_for(mail)),
+                         ("", ["portly logs 20111"], []))
+        self.assertEqual(portly.logs_command(api, 5, True), ["tail", "-n", "5", "-F", self.log])
+
+    def test_gives_a_down_port_as_json_without_process_fields(self):
+        data = json.loads(json.dumps(portly.as_json(self.down()[20111], deep=True)))
+        self.assertEqual((data["down"], data["name"], data["stack"]["role"], data["log"]),
+                         (True, "api", "api", self.log))
+        self.assertEqual([data[key] for key in ("pid", "command", "cwd", "running_seconds", "memory_kb", "url",
+                                                "connections", "restart")], [None] * 8)
+        self.assertFalse(portly.as_json(self.rows[0])["down"])
+        self.assertNotIn("log", portly.as_json(self.down()[20111]))
+
+    def view(self):
+        view = portly.LiveView(None, FakeScanner(portly.with_down_ports(self.rows)), [], False)
+        view.pull()
+        self.acted = []
+        view.run_in_background = lambda action, targets: self.acted.append((action, [i.port for i in targets]))
+        return view
+
+    def test_the_live_view_stops_and_restarts_no_down_port(self):
+        view = self.view()
+        for key in ("down", "down"):
+            view.handle(key)
+        self.assertEqual(view.selected, 20111)
+        view.handle("k")
+        self.assertEqual((view.confirm, view.message), (None, "20111 api is down: nothing runs to stop"))
+        view.handle("r")
+        self.assertEqual((view.confirm, view.message), (None, "20111 api is down: nothing runs to restart"))
+        view.message = ""
+        footer = dict((text, tone) for text, tone in view.footer_segments(200)[0])
+        self.assertEqual((footer["k"], footer["r"], footer["l"], footer["o"]),
+                         (portly.DIM, portly.DIM, portly.ACCENT, portly.DIM))
+        self.assertEqual(view.title_segments(200)[0][1][0], "2 ports in 2 projects, 2 down")
+        view.handle("K")
+        self.assertEqual(view.confirm[0], "Stop 1 port of shop wt fix/cart?")
+        view.handle("y")
+        self.assertEqual(self.acted, [("stop", [20110])])
+
+    def test_the_live_view_has_nothing_to_stop_when_a_filter_leaves_only_down_ports(self):
+        view = self.view()
+        for key in ("/", "m", "a", "i", "l", "enter", "R"):
+            view.handle(key)
+        self.assertEqual((view.order, view.confirm, view.message),
+                         ([20112], None, "nothing runs in shop wt fix/cart to restart"))
+        self.assertEqual(self.acted, [])
+
+
 class DockerTest(unittest.TestCase):
     def test_maps_published_tcp_ports_to_their_container(self):
         text = "\n".join([
@@ -982,6 +1116,11 @@ class DetailTest(unittest.TestCase):
 
 
 class StopTest(unittest.TestCase):
+    def test_never_signals_pid_0_or_1(self):
+        """0 and -1 signal whole process groups; a down row has pid 0."""
+        for pid in (-1, 0, 1):
+            self.assertEqual(_real_send(pid, 0), f"refused to signal pid {pid}")
+
     def serve(self, ignore_term, host="127.0.0.1", port=0, worker=False):
         """A throwaway listener, on a free port unless one is given; returns
         the process and port. It runs from node_modules/.bin/vite, so portly
@@ -1347,7 +1486,7 @@ class RestartPlanTest(unittest.TestCase):
             self.assertIn(said, out.getvalue())
             fields = {key: note for key, _, _, note in portly.detail_fields(item)}
             self.assertEqual(fields["restart"], said)
-            self.assertEqual(portly.as_json(item)["restart"]["env"], env)
+            self.assertEqual(portly.as_json(item, deep=True)["restart"]["env"], env)
 
     def test_starts_a_server_with_the_variables_of_its_plan_alone(self):
         self.addCleanup(os.environ.pop, "WT_PORT_API", None)
@@ -1569,13 +1708,14 @@ class CommandTest(unittest.TestCase):
         self.addCleanup(setattr, portly.os, "execvp", portly.os.execvp)
         portly.os.execvp = lambda file, args: self.ran.append(args)  # logs would replace the test run
 
-    def serve(self, log=False):
-        """A throwaway server; its output goes to out.log, or nowhere."""
+    def serve(self, log=False, cwd=""):
+        """A throwaway server, run from cwd or the test's folder; its output goes to out.log, or nowhere."""
         port = unused_port()
         output = open(os.path.join(self.folder, "out.log"), "w") if log else subprocess.DEVNULL
         if log:
             self.addCleanup(output.close)
-        proc = subprocess.Popen([sys.executable, "server.py", str(port)], cwd=self.folder,
+        proc = subprocess.Popen([sys.executable, os.path.join(self.folder, "server.py"), str(port)],
+                                cwd=cwd or self.folder,
                                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT)
         self.addCleanup(proc.wait)
         self.addCleanup(proc.kill)
@@ -1612,7 +1752,7 @@ class CommandTest(unittest.TestCase):
         [data] = json.loads(out)
         self.assertEqual((data["port"], data["pid"], data["cwd"]), (port, proc.pid, os.path.realpath(self.folder)))
         self.assertEqual(sorted(data), sorted([
-            "port", "name", "url", "addresses", "local_only", "project", "stack", "container", "pid",
+            "port", "name", "down", "url", "addresses", "local_only", "project", "stack", "container", "pid",
             "command", "cwd", "folder_gone", "running_seconds", "memory_kb", "others",
             "log", "parent", "connections", "restart", "restart_problem"]))
 
@@ -1720,6 +1860,38 @@ class CommandTest(unittest.TestCase):
         self.assertIn("does not write to a file", out)
         self.assertEqual(self.call("logs", str(unused_port()))[0], 1)
         self.assertEqual(self.ran, [])
+
+    def test_a_wt_stack_port_that_is_down_shows_with_its_log(self):
+        repo, tree = os.path.join(self.folder, "shop"), os.path.join(self.folder, "trees", "fix-cart")
+        os.makedirs(repo)
+        git("init", "-q", "-b", "main", cwd=repo)
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+        git("worktree", "add", "-q", "-b", "fix/cart", tree, cwd=repo)
+        _, web = self.serve(cwd=tree)
+        api = unused_port()
+        registry = os.path.realpath(os.path.join(repo, ".git", "shop-worktrees"))
+        os.makedirs(os.path.join(registry, "logs"))
+        with open(os.path.join(registry, "1.env"), "w") as entry:
+            entry.write(f"REG_BRANCH=fix/cart\nREG_PATH={tree}\nREG_PORTS=web={web} api={api}\n")
+        for role in ("web", "api"):
+            open(os.path.join(registry, f"1-{role}.pid"), "w").close()
+        log = os.path.join(registry, "logs", "1-api.log")
+        with open(log, "w") as lines:
+            lines.write("api crashed\n")
+        code, out, _ = self.call("list", self.word)
+        self.assertEqual(code, 0)
+        self.assertIn([str(api), "api", "down"], [line.split() for line in out.splitlines()])
+        code, out, _ = self.call(str(api))
+        self.assertIn("nothing listens on it", out)
+        self.assertIn("portly logs", out)
+        self.assertIn(api, [item["port"] for item in json.loads(self.call("--json", self.word)[1])])
+        [data] = json.loads(self.call("--json", str(api))[1])
+        self.assertEqual((data["down"], data["pid"], data["log"]), (True, None, log))
+        self.assertEqual(self.call("logs", str(api), "-n", "5")[0], 0)
+        self.assertEqual(self.ran, [["tail", "-n", "5", "-F", log]])
+        code, out, _ = self.call("kill", str(api))
+        self.assertEqual(code, 0)
+        self.assertIn("already free", out)
 
     def test_free_skips_a_taken_port(self):
         _, port = self.serve()
