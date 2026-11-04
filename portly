@@ -123,6 +123,7 @@ class Listener:
     cpu: str = ""
     others: List["Listener"] = field(default_factory=list)  # other servers on this port, beside this row
     is_down: bool = False  # a wt stack's port that nothing listens on: no process, pid 0
+    last_output: List[str] = field(default_factory=list)  # a down port's last lines in wt's log
     # Only read for the detail views (deep=True):
     parent: str = ""  # short command line of the parent
     log: str = ""  # the file its output goes to: stdout, or an open .log
@@ -556,6 +557,33 @@ def one_per_port(listeners: List[Listener]) -> List[Listener]:
     return kept
 
 
+# Colour and cursor codes a dev server writes to its log (CSI, OSC such as a
+# window title, other escapes), and the other control characters.
+TERMINAL_CODES = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+                            r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+                            r"|\x1b[@-_]"
+                            r"|[\x00-\x08\x0b-\x1f\x7f]")
+TAIL_BYTES = 16384
+
+
+def last_lines(path: str, count: int) -> List[str]:
+    """The last count lines of a log that hold text, without colour codes;
+    of a line a progress bar rewrote in place, what it showed last. Only the
+    end of the file is read; a missing file has none."""
+    try:
+        with open(path, "rb") as log:
+            size = log.seek(0, os.SEEK_END)
+            log.seek(max(0, size - TAIL_BYTES))
+            lines = log.read().decode("utf-8", errors="replace").split("\n")
+    except OSError:
+        return []
+    if size > TAIL_BYTES:
+        lines = lines[1:]  # the read began inside this one
+    shown = (TERMINAL_CODES.sub("", line.rstrip("\r").rpartition("\r")[2]).replace("\t", " ").strip()
+             for line in lines)
+    return [line for line in shown if line][-count:]
+
+
 def down_ports(rows: List[Listener]) -> List[Listener]:
     """A row per port of a wt stack that wt started a server for, but that
     nothing listens on, such as the api of a stack whose web still runs, in
@@ -578,7 +606,8 @@ def down_ports(rows: List[Listener]) -> List[Listener]:
             taken.add(port)  # two stacks on the same ports: rows are told apart by port
             log = stack.log_file(role)
             down.append(Listener(port, 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
-                                 is_down=True, log=log if os.path.isfile(log) else ""))
+                                 is_down=True, log=log if os.path.isfile(log) else "",
+                                 last_output=last_lines(log, 10)))
     return down
 
 
@@ -887,10 +916,11 @@ def note_of(item: Listener) -> List[Segment]:
     """The dim text at the end of a row: +1 process when another server
     shares the port, and the folder a server runs from when it is gone.
     Docker's own pid says nothing about the container, so a port with only
-    containers beside it says +1 container. A down port runs nothing to note."""
+    containers beside it says +1 container. A down port notes the last line
+    of its log, which is often why it went down."""
     notes: List[Segment] = []
     if item.is_down:
-        return notes
+        return [(item.last_output[-1], GONE)] if item.last_output else notes
     if item.others:
         containers = all(other.container for other in item.others)
         kind = ("container", "containers") if containers else ("process", "processes")
@@ -1076,6 +1106,8 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
     if item.is_down:
         add("state", "down", GONE, "nothing listens on it")
         add("output", output_of(item))
+        for number, line in enumerate(item.last_output):
+            add("last lines" if number == 0 else "", line, GONE if number == len(item.last_output) - 1 else DIM)
         return fields
     if item.container:
         c = item.container
@@ -1605,6 +1637,7 @@ def as_json(item: Listener, deep: bool = False) -> dict:
         "running_seconds": etime_seconds(item.elapsed) if process else None,
         "memory_kb": item.rss_kb if process else None,
         "others": [as_json(other, deep) for other in item.others],
+        "last_output": item.last_output[-1] if item.last_output else None,
     }
     if deep:
         plan = item.restart
