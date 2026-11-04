@@ -727,7 +727,7 @@ class JsonTest(unittest.TestCase):
         data = json.loads(json.dumps(portly.as_json(item)))
         self.assertEqual(data["project"], {"repo": "shop", "branch": "fix/a", "worktree": True,
                                            "path": "/t", "folder": "apps/web"})
-        self.assertEqual(data["stack"], {"name": "shop", "index": 1, "role": "web"})
+        self.assertEqual(data["stack"], {"name": "shop", "index": 1, "role": "web", "up": None, "of": None})
         self.assertEqual((data["pid"], data["container"], data["running_seconds"]), (7, None, 120))
         self.assertNotIn("connections", data)
 
@@ -1019,10 +1019,50 @@ class FilterTest(unittest.TestCase):
             portly.split_targets(["0"])
 
 
+class LastLinesTest(unittest.TestCase):
+    def write(self, data):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = os.path.join(folder.name, "1-api.log")
+        with open(path, "wb") as log:
+            log.write(data)
+        return path
+
+    def test_gives_the_last_lines_with_text_without_colour_codes(self):
+        path = self.write(b"\x1b[2m12:00\x1b[22m vite ready\r\n\n\x1b]0;title\x07"
+                          b"building 10%\rbuilding 100%\n\tat main (x.js:1)\n\x1b[1;31mError: \xff boom\x1b[0m\n  \n")
+        self.assertEqual(portly.last_lines(path, 10), ["12:00 vite ready", "building 100%", "at main (x.js:1)",
+                                                       "Error: \ufffd boom"])
+        self.assertEqual(portly.last_lines(path, 2), ["at main (x.js:1)", "Error: \ufffd boom"])
+
+    def test_reads_only_the_end_of_a_big_log(self):
+        path = self.write(b"x" * (portly.TAIL_BYTES + 10) + b"\nlast\n")
+        self.assertEqual(portly.last_lines(path, 10), ["last"])
+        self.assertEqual(portly.last_lines(path + ".gone", 10), [])
+
+    def test_keeps_the_end_of_a_last_line_longer_than_what_it_reads(self):
+        path = self.write(b"start\n" + b"x" * portly.TAIL_BYTES + b" Error: out of memory")
+        [line] = portly.last_lines(path, 10)
+        self.assertTrue(line.endswith("x Error: out of memory"))
+
+    def test_strips_colour_codes_in_every_form(self):
+        path = self.write(b"\x1b[38:2:255:0:0mError\x1b[0m \x1b[4:3mcurly\x1b[24m \x1b[>4;2mkeys\n")
+        self.assertEqual(portly.last_lines(path, 1), ["Error curly keys"])
+
+
+class CellsTest(unittest.TestCase):
+    def test_counts_and_clips_by_terminal_cells(self):
+        self.assertEqual([portly.cells(text) for text in ("vite", "🚀 up", "café", "e\u0301")], [4, 5, 4, 1])
+        self.assertEqual(portly.clip("🚀 Server crashed", 8), "🚀 Serv…")
+        self.assertEqual(portly.cells(portly.clip("日本語のエラー", 7)), 7)
+        self.assertEqual((portly.cut("🚀🚀", 3), portly.cut("abc", 2)), ("🚀", "ab"))
+        self.assertEqual(portly.clip("abc", 3), "abc")
+
+
 class DownPortTest(unittest.TestCase):
     """Stack wt1 of shop runs its web; its api and mail are down, and another
     checkout holds its db port. wt started a server for web, api and mail,
-    not for debug, and kept a log for the api only."""
+    not for debug, and kept a log for the api only, which ends in a fatal error."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1032,7 +1072,8 @@ class DownPortTest(unittest.TestCase):
         registry = os.path.join(tmp.name, "shop", ".git", "shop-worktrees")
         os.makedirs(os.path.join(registry, "logs"))
         self.log = os.path.join(registry, "logs", "1-api.log")
-        open(self.log, "w").close()
+        with open(self.log, "w") as log:
+            log.write("starting api\n\x1b[31mPHP Fatal error:  Allowed memory size exhausted\x1b[0m\n\n")
         self.stack = portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111, "mail": 20112, "db": 20113,
                                                          "debug": 20114}, registry)
         for role in ("web", "api", "mail", "db"):
@@ -1078,14 +1119,15 @@ class DownPortTest(unittest.TestCase):
             ["blog", "·", "main", "/x/blog"],
             ["20113", "postgres", "●"],
             [],
-            ["shop", "·", "fix/cart", "·", "wt1", portly.tilde(self.tree)],
+            ["shop", "·", "fix/cart", "·", "wt1", "1/3", "up", portly.tilde(self.tree)],
             ["20110", "web", "vite", "●"],
-            ["20111", "api", "✗"],
+            ["20111", "api", "✗", "PHP", "Fatal", "error:", "Allowed", "memory", "size", "exhausted"],
             ["20112", "mail", "✗"],
         ])
         [api] = [segments for item, _, segments in portly.group_lines(groups, 120) if item and item.port == 20111]
         self.assertEqual([(text.strip(), tone) for text, tone in api if text.strip()],
-                         [("20111", portly.DIM), ("api", portly.DIM), ("✗", portly.GONE)])
+                         [("20111", portly.DIM), ("api", portly.DIM), ("✗", portly.GONE),
+                          ("PHP Fatal error:  Allowed memory size exhausted", portly.GONE)])
         self.assertEqual(portly.summary_segments(groups), [("2 projects · 2 ports", portly.DIM), (" · ", portly.DIM),
                                                            ("2 down", portly.GONE)])
 
@@ -1101,7 +1143,10 @@ class DownPortTest(unittest.TestCase):
     def test_shows_a_down_port_without_a_process(self):
         api, mail = self.down()[20111], self.down()[20112]
         fields = {key: (value, tone, note) for key, value, tone, note in portly.detail_fields(api)}
-        self.assertEqual(list(fields), ["project", "stack", "state", "output"])
+        self.assertEqual([field[:3] for field in portly.detail_fields(api)][4:], [
+            ("last lines", "starting api", portly.DIM),
+            ("", "PHP Fatal error:  Allowed memory size exhausted", portly.GONE)])
+        self.assertEqual(list(fields), ["project", "stack", "state", "output", "last lines", ""])
         self.assertEqual(fields["stack"], ("wt 1 of shop", "", "api"))
         self.assertEqual(fields["state"], ("down", portly.GONE, "nothing listens on it"))
         self.assertEqual(fields["output"][0], portly.tilde(self.log))
@@ -1118,6 +1163,66 @@ class DownPortTest(unittest.TestCase):
                                                 "connections", "restart")], [None] * 8)
         self.assertFalse(portly.as_json(self.rows[0])["down"])
         self.assertNotIn("log", portly.as_json(self.down()[20111]))
+        self.assertEqual(data["last_lines"], ["starting api", "PHP Fatal error:  Allowed memory size exhausted"])
+        rows = portly.with_down_ports(self.rows)
+        self.assertEqual([(item.port, portly.as_json(item)["stack"]["up"], portly.as_json(item)["stack"]["of"])
+                          for item in rows if item.stack], [(20110, 1, 3), (20111, 1, 3), (20112, 1, 3)])
+        self.assertIsNone(portly.as_json(rows[0])["last_lines"])
+
+    def test_counts_the_ports_of_a_stack_that_are_up(self):
+        """Of web, api and mail, which wt started servers for, web runs. db is
+        held by another checkout and debug has no server: neither counts."""
+        rows = portly.with_down_ports(self.rows)
+        self.assertEqual((self.stack.up, self.stack.of), (1, 3))
+        [group] = [group for group in portly.group_rows(rows) if group.title == "shop"]
+        self.assertIn(("1/3 up", portly.WORKTREE), portly.header_segments(group, 120))
+        for role in ("api", "mail"):
+            os.remove(self.stack.pid_file(role))
+        [group] = [group for group in portly.group_rows(portly.with_down_ports(self.rows)) if group.title == "shop"]
+        self.assertIn(("1/1 up", portly.FREE), portly.header_segments(group, 120))
+        self.assertNotIn("up", "".join(text for text, _ in portly.header_segments(group, 26)))
+
+    def test_the_live_view_remembers_when_a_port_went_down(self):
+        clock = portly.DownClock()
+        mail = listener(20112, 3, args="node mail.js", cwd=self.tree, place=self.tree_place)
+        mail.stack = self.stack
+        scans = {"mail up": self.rows + [mail], "mail down": self.rows, "web restarting": self.rows[1:]}
+
+        def scan(name, now):
+            rows = portly.with_down_ports(scans[name])
+            clock.update(rows, now)
+            return {item.port: item.down_since for item in rows if item.is_down}
+
+        self.assertEqual(scan("mail up", 1000.0), {20111: 0.0})
+        self.assertEqual(scan("mail down", 1200.0), {20111: 0.0, 20112: 1200.0})
+        self.assertEqual(scan("web restarting", 1300.0), {})  # no running row: no down rows either
+        self.assertEqual(scan("mail down", 1400.0), {20111: 0.0, 20112: 1200.0})
+        self.assertEqual(scan("mail up", 1500.0), {20111: 0.0})
+        self.assertEqual(scan("mail down", 1600.0), {20111: 0.0, 20112: 1600.0})
+        [mail] = [item for item in portly.with_down_ports(self.rows) if item.port == 20112]
+        mail.down_since = time.time() - 180
+        self.assertEqual(portly.age_of(mail), "3m")
+        self.assertTrue(dict((key, note) for key, _, _, note in portly.detail_fields(mail))["state"]
+                        .startswith("nothing listens on it · since "))
+
+    def test_a_container_port_counts_neither_way(self):
+        db = listener(20114, 9, args=DOCKER_BACKEND, cwd="/", place=self.tree_place)
+        db.container = portly.Container("shop-wt1-debug-1", "mailpit", "Up 1 hour", "shop-wt1", "debug", self.tree)
+        db.stack = self.stack
+        portly.with_down_ports(self.rows + [db])
+        self.assertEqual((self.stack.up, self.stack.of), (1, 3))
+
+    def test_a_header_counts_only_the_stack_it_names(self):
+        other = portly.Stack("shop", 2, self.tree, {"web": 20110}, self.stack.registry)
+        open(other.pid_file("web"), "w").close()
+        self.rows[0].stack = other
+        left = listener(20100, 8, args=DOCKER_BACKEND, cwd="/", place=self.tree_place)
+        left.container = portly.Container("shop-wt1-db-1", "mysql", "Up", "shop-wt1", "db", self.tree)
+        [group] = [g for g in portly.group_rows(portly.with_down_ports(self.rows + [left])) if g.title == "shop"]
+        self.assertEqual((other.up, other.of), (1, 1))
+        header = "".join(text for text, _ in portly.header_segments(group, 120))
+        self.assertIn("· wt1", header)
+        self.assertNotIn("up", header)
 
     def view(self):
         view = portly.LiveView(None, FakeScanner(portly.with_down_ports(self.rows)), [], False)
@@ -1887,6 +1992,7 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((data["port"], data["pid"], data["cwd"]), (port, proc.pid, os.path.realpath(self.folder)))
         self.assertEqual(sorted(data), sorted([
             "port", "name", "down", "url", "addresses", "local_only", "project", "stack", "container", "pid",
+            "last_lines",
             "command", "cwd", "folder_gone", "running_seconds", "memory_kb", "others",
             "log", "parent", "connections", "restart", "restart_problem"]))
 
@@ -2014,9 +2120,12 @@ class CommandTest(unittest.TestCase):
             lines.write("api crashed\n")
         code, out, _ = self.call("list", self.word)
         self.assertEqual(code, 0)
-        self.assertIn([str(api), "api", "✗"], [line.split() for line in out.splitlines()])
+        listed = [line.split() for line in out.splitlines()]
+        self.assertIn([str(api), "api", "✗", "api", "crashed"], listed)
+        self.assertIn(["wt1", "1/2", "up"], [line[4:7] for line in listed])
         code, out, _ = self.call(str(api))
         self.assertIn("nothing listens on it", out)
+        self.assertIn("last lines api crashed", " ".join(out.split()))
         self.assertIn("portly logs", out)
         self.assertIn(api, [item["port"] for item in json.loads(self.call("--json", self.word)[1])])
         [data] = json.loads(self.call("--json", str(api))[1])

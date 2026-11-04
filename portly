@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, replace
@@ -70,6 +71,10 @@ class Stack:
     ports: Dict[str, int]  # role (web, api, gcs, ...) to port
     registry: str = ""  # the folder with wt's entries, pid files and logs
     db: str = ""  # the worktree's database, "" without one
+    # Of its ports wt started a server for, how many listen and how many listen
+    # or are down: set per scan by count_up, so not part of what a Stack is.
+    up: int = field(default=0, compare=False, repr=False)
+    of: int = field(default=0, compare=False, repr=False)
 
     def role_of(self, port: int) -> str:
         return next((role for role, value in self.ports.items() if value == port), "")
@@ -123,6 +128,8 @@ class Listener:
     cpu: str = ""
     others: List["Listener"] = field(default_factory=list)  # other servers on this port, beside this row
     is_down: bool = False  # a wt stack's port that nothing listens on: no process, pid 0
+    last_output: List[str] = field(default_factory=list)  # a down port's last lines in wt's log
+    down_since: float = 0.0  # when the live view saw a down port go down; 0 when it does not know
     # Only read for the detail views (deep=True):
     parent: str = ""  # short command line of the parent
     log: str = ""  # the file its output goes to: stdout, or an open .log
@@ -556,6 +563,33 @@ def one_per_port(listeners: List[Listener]) -> List[Listener]:
     return kept
 
 
+# Colour and cursor codes a dev server writes to its log (CSI, OSC such as a
+# window title, other escapes), and the other control characters.
+TERMINAL_CODES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]"
+                            r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+                            r"|\x1b[@-_]"
+                            r"|[\x00-\x08\x0b-\x1f\x7f]")
+TAIL_BYTES = 16384
+
+
+def last_lines(path: str, count: int) -> List[str]:
+    """The last count lines of a log that hold text, without colour codes;
+    of a line a progress bar rewrote in place, what it showed last. Only the
+    end of the file is read; a missing file has none."""
+    try:
+        with open(path, "rb") as log:
+            size = log.seek(0, os.SEEK_END)
+            log.seek(max(0, size - TAIL_BYTES))
+            lines = log.read().decode("utf-8", errors="replace").split("\n")
+    except OSError:
+        return []
+    if size > TAIL_BYTES and len(lines) > 1:
+        lines = lines[1:]  # the read began inside this one
+    shown = (TERMINAL_CODES.sub("", line.rstrip("\r").rpartition("\r")[2]).replace("\t", " ").strip()
+             for line in lines)
+    return [line for line in shown if line][-count:]
+
+
 def down_ports(rows: List[Listener]) -> List[Listener]:
     """A row per port of a wt stack that wt started a server for, but that
     nothing listens on, such as the api of a stack whose web still runs, in
@@ -576,16 +610,33 @@ def down_ports(rows: List[Listener]) -> List[Listener]:
             if port in taken or not os.path.isfile(stack.pid_file(role)):
                 continue
             taken.add(port)  # two stacks on the same ports: rows are told apart by port
-            log = stack.log_file(role)
+            log = stack.log_file(role) if os.path.isfile(stack.log_file(role)) else ""
             down.append(Listener(port, 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
-                                 is_down=True, log=log if os.path.isfile(log) else ""))
+                                 is_down=True, log=log, last_output=last_lines(log, 10) if log else []))
     return down
 
 
 def with_down_ports(rows: List[Listener]) -> List[Listener]:
-    """rows and the stack ports that are down, by port. Only for showing:
-    a down row has no process to stop or restart."""
-    return sorted(rows + down_ports(rows), key=lambda item: item.port)
+    """rows and the stack ports that are down, by port, with each stack's
+    count of what is up. Only for showing: a down row has no process to
+    stop or restart."""
+    rows = sorted(rows + down_ports(rows), key=lambda item: item.port)
+    count_up(rows)
+    return rows
+
+
+def count_up(rows: List[Listener]) -> None:
+    """Give each wt stack among rows how many of the ports wt started a
+    server for listen, of those that listen or are down: what down_ports can
+    tell is down. A container's port has no pid file of wt's, so it counts
+    neither way, and neither does a port another checkout holds."""
+    stacks: Dict[int, Tuple[Stack, List[Listener]]] = {}
+    for item in rows:
+        role = item.stack.role_of(item.port) if item.stack else ""
+        if role and os.path.isfile(item.stack.pid_file(role)):
+            stacks.setdefault(id(item.stack), (item.stack, []))[1].append(item)
+    for stack, items in stacks.values():
+        stack.up, stack.of = sum(1 for item in items if not item.is_down), len(items)
 
 
 def drop_helpers(rows: List[Listener]) -> List[Listener]:
@@ -698,6 +749,9 @@ def docker_age(status: str) -> str:
 
 
 def age_of(item: Listener) -> str:
+    """How long it runs, or for a down port how long it has been down, when the live view saw it go."""
+    if item.is_down:
+        return short_duration(int(time.time() - item.down_since)) if item.down_since else ""
     return docker_age(item.container.status) if item.container else short_age(item.elapsed)
 
 
@@ -752,8 +806,30 @@ class Paint:
 BOLD, DIM, WORKTREE, GONE, FREE, ACCENT, LINK = "1", "90", "33", "31", "32", "1;38;5;208", "4;36"
 
 
+def cells(text: str) -> int:
+    """The terminal cells text takes: two for a wide character, such as an
+    emoji or a CJK one, none for a combining mark."""
+    if text.isascii():
+        return len(text)
+    return sum(0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in "WF" else 1
+               for char in text)
+
+
+def cut(text: str, room: int) -> str:
+    """The longest start of text that fits in room cells."""
+    if text.isascii():
+        return text[: max(room, 0)]
+    used = 0
+    for index, char in enumerate(text):
+        used += cells(char)
+        if used > room:
+            return text[:index]
+    return text
+
+
 def clip(text: str, width: int) -> str:
-    return text if len(text) <= width else text[: max(width - 1, 0)] + "…"
+    """text in width cells, with … where it was cut."""
+    return text if cells(text) <= width else cut(text, width - 1) + "…"
 
 
 def fit(widths: List[int], mins: List[int], room: int) -> List[int]:
@@ -861,11 +937,12 @@ def group_stack(group: Group) -> str:
 
 
 def header_segments(group: Group, width: int) -> List[Segment]:
-    """repo · branch · wt1, or repo · branch · worktree for a worktree wt did
-    not make, then the path, dim, while it fits. A part that does not fit is
-    left out, with what follows it."""
+    """repo · branch · wt1 and how many of the stack's ports are up, or repo
+    · branch · worktree for a worktree wt did not make, then the path, dim,
+    while it fits. A part that does not fit is left out, with what follows it."""
     tone = GONE if group.title == ORPHANS else DIM if group.title == OTHERS else ACCENT
-    kind = group_stack(group) or ("worktree" if group.is_worktree else "")
+    wt = group_stack(group)
+    kind = wt or ("worktree" if group.is_worktree else "")
     parts = [(group.title, tone), (group.branch, WORKTREE if group.is_worktree else ""), (kind, WORKTREE)]
     segments: List[Segment] = [("  ", "")]
     room = width - 2
@@ -878,19 +955,28 @@ def header_segments(group: Group, width: int) -> List[Segment]:
         text = clip(text, room - gap)
         segments.append((text, part_tone))
         room -= gap + len(text)
+    stack = next((item.stack for item in group.rows if item.stack and f"wt{item.stack.index}" == wt), None)
+    if stack and stack.of and segments[-1] == (wt, WORKTREE) and room - 2 >= len(up_text(stack)):
+        segments += [("  ", ""), (up_text(stack), FREE if stack.up == stack.of else WORKTREE)]
+        room -= 2 + len(up_text(stack))
     if group.path and room - 2 >= min(len(group.path), 4):
         segments += [("  ", ""), (clip(group.path, room - 2), DIM)]
     return segments
+
+
+def up_text(stack: Stack) -> str:
+    return f"{stack.up}/{stack.of} up"
 
 
 def note_of(item: Listener) -> List[Segment]:
     """The dim text at the end of a row: +1 process when another server
     shares the port, and the folder a server runs from when it is gone.
     Docker's own pid says nothing about the container, so a port with only
-    containers beside it says +1 container. A down port runs nothing to note."""
+    containers beside it says +1 container. A down port notes the last line
+    of its log, which is often why it went down."""
     notes: List[Segment] = []
     if item.is_down:
-        return notes
+        return [(item.last_output[-1], GONE)] if item.last_output else notes
     if item.others:
         containers = all(other.container for other in item.others)
         kind = ("container", "containers") if containers else ("process", "processes")
@@ -940,7 +1026,7 @@ def row_end(item: Listener, columns: Columns, width: int, segments: List[Segment
     """segments, then status, age and each note that fits."""
     segments = segments + [("  ", ""), status_of(item), ("  ", ""), (columns.ages[id(item)].rjust(columns.age_w), DIM)]
     for text, tone in note_of(item):
-        room = width - sum(len(piece) for piece, _ in segments) - 2
+        room = width - sum(cells(piece) for piece, _ in segments) - 2
         if room >= min(len(text), 4):
             segments += [("  ", ""), (clip(text, room), tone)]
     return segments
@@ -1071,11 +1157,13 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
     if item.place:
         add("project", f"{item.place.repo} · {branch_text(item.place.branch, item.place.is_worktree)}")
     if item.stack:
-        role = next((role for role, port in item.stack.ports.items() if port == item.port), "")
-        add("stack", f"wt {item.stack.index} of {item.stack.name}", note=role)
+        add("stack", f"wt {item.stack.index} of {item.stack.name}", note=item.stack.role_of(item.port))
     if item.is_down:
-        add("state", "down", GONE, "nothing listens on it")
+        since = f" · since {started_at(int(time.time() - item.down_since))}" if item.down_since else ""
+        add("state", "down", GONE, "nothing listens on it" + since)
         add("output", output_of(item))
+        for number, line in enumerate(item.last_output):
+            add("last lines" if number == 0 else "", line, GONE if number == len(item.last_output) - 1 else DIM)
         return fields
     if item.container:
         c = item.container
@@ -1593,7 +1681,8 @@ def as_json(item: Listener, deep: bool = False) -> dict:
         "project": place and {"repo": place.repo, "branch": place.branch, "worktree": place.is_worktree,
                               "path": place.top, "folder": place.sub},
         "stack": stack and {"name": stack.name, "index": stack.index,
-                            "role": next((r for r, port in stack.ports.items() if port == item.port), None)},
+                            "role": stack.role_of(item.port) or None,
+                            "up": stack.up if stack.of else None, "of": stack.of or None},
         "container": container and {"name": container.name, "image": container.image,
                                     "status": container.status, "compose_project": container.project or None,
                                     "service": container.service or None,
@@ -1605,6 +1694,7 @@ def as_json(item: Listener, deep: bool = False) -> dict:
         "running_seconds": etime_seconds(item.elapsed) if process else None,
         "memory_kb": item.rss_kb if process else None,
         "others": [as_json(other, deep) for other in item.others],
+        "last_lines": item.last_output if item.is_down else None,
     }
     if deep:
         plan = item.restart
@@ -1668,6 +1758,30 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
+class DownClock:
+    """When each port stopped listening, as the live view's scans saw it: a
+    port that listened at one scan and not at the next went down then. It
+    keeps that time while the port stays down, also through scans that show
+    no row for it, such as while the rest of its stack restarts."""
+
+    def __init__(self):
+        self.listening: Set[int] = set()
+        self.went_down: Dict[int, float] = {}
+
+    def update(self, rows: List[Listener], now: Optional[float] = None) -> None:
+        """Note this scan, and give its down rows their time; 0 when the port was down from the first scan on."""
+        now = time.time() if now is None else now
+        listening = {item.port for item in rows if not item.is_down}
+        for port in self.listening - listening:
+            self.went_down.setdefault(port, now)
+        for port in listening:
+            self.went_down.pop(port, None)
+        self.listening = listening
+        for item in rows:
+            if item.is_down:
+                item.down_since = self.went_down.get(item.port, 0.0)
+
+
 class Scanner(threading.Thread):
     """Reads every port in the background, every few seconds or on demand."""
 
@@ -1680,11 +1794,13 @@ class Scanner(threading.Thread):
         self.version = 0
         self.scanned_at = 0.0
         self.error = ""
+        self.clock = DownClock()
 
     def run(self) -> None:
         while True:
             try:
                 rows = with_down_ports(one_per_port(read_listeners(deep=True)))
+                self.clock.update(rows)
             except Exception as error:  # the view stays up and shows what went wrong
                 with self.lock:
                     self.error = f"scan failed: {error}"
@@ -2073,10 +2189,10 @@ class LiveView:
         if x >= width or not text:
             return x
         try:
-            self.screen.addstr(y, x, text[: width - x], attr)
+            self.screen.addstr(y, x, cut(text, width - x), attr)
         except curses.error:
             pass  # curses refuses the bottom-right cell; the text before it is drawn
-        return min(width, x + len(text))
+        return min(width, x + cells(text))
 
     def put_segments(self, y: int, segments: List[Segment], styles: Dict[str, int], fill: bool = False) -> None:
         x = 0
