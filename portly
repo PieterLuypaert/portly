@@ -70,6 +70,8 @@ class Stack:
     ports: Dict[str, int]  # role (web, api, gcs, ...) to port
     registry: str = ""  # the folder with wt's entries, pid files and logs
     db: str = ""  # the worktree's database, "" without one
+    up: int = 0  # of its ports that listen or are down, how many listen: set by count_up
+    of: int = 0
 
     def role_of(self, port: int) -> str:
         return next((role for role, value in self.ports.items() if value == port), "")
@@ -612,9 +614,24 @@ def down_ports(rows: List[Listener]) -> List[Listener]:
 
 
 def with_down_ports(rows: List[Listener]) -> List[Listener]:
-    """rows and the stack ports that are down, by port. Only for showing:
-    a down row has no process to stop or restart."""
-    return sorted(rows + down_ports(rows), key=lambda item: item.port)
+    """rows and the stack ports that are down, by port, with each stack's
+    count of what is up. Only for showing: a down row has no process to
+    stop or restart."""
+    rows = sorted(rows + down_ports(rows), key=lambda item: item.port)
+    count_up(rows)
+    return rows
+
+
+def count_up(rows: List[Listener]) -> None:
+    """Give each wt stack among rows how many of its ports listen, of those
+    that listen or are down. A port wt starts no server for and that does
+    not listen, or that another checkout holds, is neither."""
+    stacks: Dict[int, Tuple[Stack, List[Listener]]] = {}
+    for item in rows:
+        if item.stack and item.stack.role_of(item.port):
+            stacks.setdefault(id(item.stack), (item.stack, []))[1].append(item)
+    for stack, items in stacks.values():
+        stack.up, stack.of = sum(1 for item in items if not item.is_down), len(items)
 
 
 def drop_helpers(rows: List[Listener]) -> List[Listener]:
@@ -890,11 +907,12 @@ def group_stack(group: Group) -> str:
 
 
 def header_segments(group: Group, width: int) -> List[Segment]:
-    """repo · branch · wt1, or repo · branch · worktree for a worktree wt did
-    not make, then the path, dim, while it fits. A part that does not fit is
-    left out, with what follows it."""
+    """repo · branch · wt1 and how many of the stack's ports are up, or repo
+    · branch · worktree for a worktree wt did not make, then the path, dim,
+    while it fits. A part that does not fit is left out, with what follows it."""
     tone = GONE if group.title == ORPHANS else DIM if group.title == OTHERS else ACCENT
-    kind = group_stack(group) or ("worktree" if group.is_worktree else "")
+    wt = group_stack(group)
+    kind = wt or ("worktree" if group.is_worktree else "")
     parts = [(group.title, tone), (group.branch, WORKTREE if group.is_worktree else ""), (kind, WORKTREE)]
     segments: List[Segment] = [("  ", "")]
     room = width - 2
@@ -907,9 +925,17 @@ def header_segments(group: Group, width: int) -> List[Segment]:
         text = clip(text, room - gap)
         segments.append((text, part_tone))
         room -= gap + len(text)
+    stack = next((item.stack for item in group.rows if item.stack and item.stack.of), None)
+    if wt and stack and segments[-1] == (wt, WORKTREE) and room - 2 >= len(up_text(stack)):
+        segments += [("  ", ""), (up_text(stack), FREE if stack.up == stack.of else WORKTREE)]
+        room -= 2 + len(up_text(stack))
     if group.path and room - 2 >= min(len(group.path), 4):
         segments += [("  ", ""), (clip(group.path, room - 2), DIM)]
     return segments
+
+
+def up_text(stack: Stack) -> str:
+    return f"{stack.up}/{stack.of} up"
 
 
 def note_of(item: Listener) -> List[Segment]:
@@ -1625,7 +1651,8 @@ def as_json(item: Listener, deep: bool = False) -> dict:
         "project": place and {"repo": place.repo, "branch": place.branch, "worktree": place.is_worktree,
                               "path": place.top, "folder": place.sub},
         "stack": stack and {"name": stack.name, "index": stack.index,
-                            "role": next((r for r, port in stack.ports.items() if port == item.port), None)},
+                            "role": next((r for r, port in stack.ports.items() if port == item.port), None),
+                            "up": stack.up, "of": stack.of},
         "container": container and {"name": container.name, "image": container.image,
                                     "status": container.status, "compose_project": container.project or None,
                                     "service": container.service or None,
