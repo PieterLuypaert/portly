@@ -1508,9 +1508,10 @@ def port_number(text: str) -> int:
     return int(text)
 
 
-def as_json(item: Listener) -> dict:
-    """One port as plain data; fields that do not apply are null. A down port
-    has no process, so no process fields, and gives wt's log."""
+def as_json(item: Listener, deep: bool = False) -> dict:
+    """One port as plain data; fields that do not apply are null. deep adds
+    what only the detail views read: log, parent, connections and restart.
+    A down port has no process, so only its log, which is wt's."""
     place, stack, container = item.place, item.stack, item.container
     process = not container and not item.is_down
     data = {
@@ -1534,13 +1535,12 @@ def as_json(item: Listener) -> dict:
         "folder_gone": is_orphan(item),
         "running_seconds": etime_seconds(item.elapsed) if process else None,
         "memory_kb": item.rss_kb if process else None,
-        "others": [as_json(other) for other in item.others],
+        "others": [as_json(other, deep) for other in item.others],
     }
-    if item.is_down:
-        data["log"] = item.log or None
-    elif item.connections >= 0:
+    if deep:
         plan = item.restart
-        data.update(log=item.log or None, parent=item.parent or None, connections=item.connections,
+        data.update(log=item.log or None, parent=item.parent or None,
+                    connections=None if item.is_down else item.connections,
                     restart=plan and {"command": plan.argv, "cwd": plan.cwd, "log": plan.log, "env": plan.env},
                     restart_problem=item.restart_problem or None)
     return data
@@ -2186,7 +2186,7 @@ def cmd_show(argv: List[str]) -> int:
     rows = with_down_ports(one_per_port(read_listeners(deep=bool(ports))))
     if args.json:
         chosen = [item for item in rows if item.port in ports] if ports else visible(rows, terms, args.all)
-        print(json.dumps([as_json(item) for item in chosen], indent=2, ensure_ascii=False))
+        print(json.dumps([as_json(item, deep=bool(ports)) for item in chosen], indent=2, ensure_ascii=False))
         return 0
     if ports:
         return show_ports(ports, rows, paint_for_stdout())

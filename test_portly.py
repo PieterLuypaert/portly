@@ -977,12 +977,13 @@ class DownPortTest(unittest.TestCase):
         self.assertEqual(portly.logs_command(api, 5, True), ["tail", "-n", "5", "-F", self.log])
 
     def test_gives_a_down_port_as_json_without_process_fields(self):
-        data = json.loads(json.dumps(portly.as_json(self.down()[20111])))
+        data = json.loads(json.dumps(portly.as_json(self.down()[20111], deep=True)))
         self.assertEqual((data["down"], data["name"], data["stack"]["role"], data["log"]),
                          (True, "api", "api", self.log))
-        self.assertEqual([data[key] for key in ("pid", "command", "cwd", "running_seconds", "memory_kb", "url")],
-                         [None] * 6)
+        self.assertEqual([data[key] for key in ("pid", "command", "cwd", "running_seconds", "memory_kb", "url",
+                                                "connections", "restart")], [None] * 8)
         self.assertFalse(portly.as_json(self.rows[0])["down"])
+        self.assertNotIn("log", portly.as_json(self.down()[20111]))
 
     def view(self):
         view = portly.LiveView(None, FakeScanner(portly.with_down_ports(self.rows)), [], False)
@@ -1485,7 +1486,7 @@ class RestartPlanTest(unittest.TestCase):
             self.assertIn(said, out.getvalue())
             fields = {key: note for key, _, _, note in portly.detail_fields(item)}
             self.assertEqual(fields["restart"], said)
-            self.assertEqual(portly.as_json(item)["restart"]["env"], env)
+            self.assertEqual(portly.as_json(item, deep=True)["restart"]["env"], env)
 
     def test_starts_a_server_with_the_variables_of_its_plan_alone(self):
         self.addCleanup(os.environ.pop, "WT_PORT_API", None)
@@ -1883,7 +1884,8 @@ class CommandTest(unittest.TestCase):
         code, out, _ = self.call(str(api))
         self.assertIn("nothing listens on it", out)
         self.assertIn("portly logs", out)
-        [data] = [item for item in json.loads(self.call("--json", self.word)[1]) if item["port"] == api]
+        self.assertIn(api, [item["port"] for item in json.loads(self.call("--json", self.word)[1])])
+        [data] = json.loads(self.call("--json", str(api))[1])
         self.assertEqual((data["down"], data["pid"], data["log"]), (True, None, log))
         self.assertEqual(self.call("logs", str(api), "-n", "5")[0], 0)
         self.assertEqual(self.ran, [["tail", "-n", "5", "-F", log]])
