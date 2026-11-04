@@ -1814,8 +1814,24 @@ class KeyReader:
 class LiveView:
     """portly live: the grouped list on top, the selected port below, keys at the bottom."""
 
-    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("c", "copy"), ("r", "restart"), ("k", "stop"),
-            ("R K", "whole project"), ("/", "search"), ("a", "all"), ("q", "quit")]
+    # The key row: only the keys that do something for the selected row.
+    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("r", "restart"), ("k", "stop"),
+            ("RK", "stack"), ("?", "keys")]
+    # What ? lists: every key.
+    ALL_KEYS = [
+        ("↑↓ pgup pgdn home end", "select a port; a click selects one, the wheel scrolls"),
+        ("o enter", "open its url in the browser"),
+        ("c", "copy its url"),
+        ("l", "follow its output"),
+        ("r", "restart it the way it was started"),
+        ("k", "stop it"),
+        ("R K", "restart or stop every port of its stack or project"),
+        ("/", "filter by project, branch, folder or tool; enter keeps it"),
+        ("esc", "clear the filter"),
+        ("a", "show apps and helper processes too, or hide them again"),
+        ("?", "these keys"),
+        ("q", "quit"),
+    ]
 
     def __init__(self, screen, scanner: Scanner, terms: List[str], show_all: bool):
         self.screen, self.scanner = screen, scanner
@@ -1831,6 +1847,7 @@ class LiveView:
         self.busy, self.busy_lock = "", threading.Lock()
         self.message, self.message_tone, self.message_at = "", "", 0.0
         self.row_at: Dict[int, int] = {}  # screen line to port, for the mouse
+        self.showing_keys = False  # ? shows every key over the list, until the next key
 
     # --- state
 
@@ -1970,6 +1987,9 @@ class LiveView:
             return True
         if self.editing:
             return self.edit_filter(key)
+        if self.showing_keys:
+            self.showing_keys = key == "resize"  # any key closes the list and does nothing else
+            return True
         if key == "q":
             return False
         if key == "esc":
@@ -1989,6 +2009,8 @@ class LiveView:
             actions[key]()
         elif key == "/":
             self.editing = True
+        elif key == "?":
+            self.showing_keys = True
         elif key == "a":
             self.show_all = not self.show_all
             self.rebuild()
@@ -2071,16 +2093,28 @@ class LiveView:
             return [(f" {frame} ", ACCENT), (busy, ""), ("  ", "")] + said, False
         if said:
             return said, False
-        item = self.current()
-        possible = {"o": bool(item and url_of(item)), "c": bool(item and url_of(item)),
-                    "r": bool(item and (item.container or item.restart)),
-                    "l": bool(item and (item.container or item.log)),
-                    "k": bool(item and not item.is_down and not is_docker_itself(item)), "K": bool(item)}
         segments: List[Segment] = [(" ", "")]
         for key, what in self.KEYS:
-            on = possible.get(key, True)
-            segments += [(key, ACCENT if on else DIM), (f" {what}   ", "" if on else DIM)]
+            if self.can_press(key):
+                segments += [(key, ACCENT), (f" {what}  ", DIM)]
         return segments, False
+
+    def can_press(self, key: str) -> bool:
+        """Whether a key of the key row does something for the selected row."""
+        item, group = self.current(), self.current_group()
+        if key == "?":
+            return True
+        if not item or not group:
+            return False
+        return {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log),
+                "r": bool(item.container or item.restart),
+                "k": not item.is_down and not is_docker_itself(item),
+                "RK": any(not row.is_down for row in group.rows)}[key]
+
+    def keys_lines(self) -> List[List[Segment]]:
+        key_w = max(len(key) for key, _ in self.ALL_KEYS) + 3
+        return [[("  ", ""), ("keys", BOLD)], []] + [
+            [("    ", ""), (key.ljust(key_w), ACCENT), (what, "")] for key, what in self.ALL_KEYS]
 
     def title_segments(self, width: int) -> Tuple[List[Segment], List[Segment]]:
         left = [("  ", DIM)] + summary_segments(self.groups)
@@ -2112,6 +2146,14 @@ class LiveView:
         x = max(x + 2, width - 1 - right_w)
         for text, tone in right:
             x = self.put(0, x, text, styles.normal[tone])
+        if self.showing_keys:
+            self.row_at = {}
+            for offset, segments in enumerate(self.keys_lines()[: height - 3]):
+                self.put_segments(2 + offset, segments, styles.normal)
+            self.put_segments(height - 1, [(" any key closes this", DIM)], styles.normal)
+            screen.refresh()
+            return
+
         item = self.current()
         detail = self.detail_segments(item, width) if item else []
         detail_h = min(len(detail) + 1, max(0, (height - 4) // 2)) if detail else 0

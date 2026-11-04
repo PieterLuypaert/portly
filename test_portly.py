@@ -216,6 +216,34 @@ class LiveViewTest(unittest.TestCase):
         for key in keys:
             self.assertTrue(self.view.handle(key))
 
+    def keys(self):
+        return [text for text, tone in self.view.footer_segments(200)[0] if tone == portly.ACCENT]
+
+    def test_the_key_row_shows_only_the_keys_for_the_selected_row(self):
+        self.assertEqual(self.keys(), ["↑↓", "o", "k", "RK", "?"])
+        self.rows[0].log = "/x/web.log"
+        self.rows[0].restart = portly.Restart(["pnpm", "dev"], "/x/shop/apps/web", [10, 1], "/x/web.log")
+        self.assertEqual(self.keys(), ["↑↓", "o", "l", "r", "k", "RK", "?"])
+        database = listener(5432, 5, args="postgres -D /x/db", cwd=HOME_DIR, place=place(sub="db"))
+        self.scanner.rows, self.scanner.version = self.rows + [database], 2
+        self.view.pull()
+        self.view.selected = 5432
+        self.assertEqual(self.keys(), ["↑↓", "k", "RK", "?"])
+
+    def test_question_mark_lists_every_key_until_the_next_key(self):
+        stopped = []
+        self.view.run_in_background = lambda action, targets: stopped.append(targets)
+        self.press("?", "resize")
+        self.assertTrue(self.view.showing_keys)
+        listed = ["".join(text for text, _ in line).split()[0] for line in self.view.keys_lines()[2:]]
+        self.assertEqual(listed, ["↑↓", "o", "c", "l", "r", "k", "R", "/", "esc", "a", "?", "q"])
+        self.press("k")
+        self.assertEqual((self.view.showing_keys, self.view.confirm), (False, None))
+        self.press("?", "q")
+        self.assertFalse(self.view.showing_keys)
+        self.assertFalse(self.view.handle("q"))
+        self.assertEqual(stopped, [])
+
     def test_says_when_no_browser_opener_is_found(self):
         self.addCleanup(setattr, portly, "opener", portly.opener)
         portly.opener = lambda: "/nonexistent/xdg-open"
@@ -498,6 +526,10 @@ class LiveTerminalTest(unittest.TestCase):
     def test_draws_the_server_takes_keys_and_quits(self):
         self.press("\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[H", "\x1b[<64;3;3M", "\x1b[<0;3;3M", "a")
         self.press("/", "x", "\x7f", "\x1b")
+        self.press("?")
+        self.expect("these keys")
+        self.press("x")
+        self.expect(self.port)
         self.quit()
 
     def test_survives_a_window_too_small_and_comes_back(self):
@@ -1073,9 +1105,8 @@ class DownPortTest(unittest.TestCase):
         view.handle("r")
         self.assertEqual((view.confirm, view.message), (None, "20111 api is down: nothing runs to restart"))
         view.message = ""
-        footer = dict((text, tone) for text, tone in view.footer_segments(200)[0])
-        self.assertEqual((footer["k"], footer["r"], footer["l"], footer["o"]),
-                         (portly.DIM, portly.DIM, portly.ACCENT, portly.DIM))
+        keys = [text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT]
+        self.assertEqual(keys, ["↑↓", "l", "RK", "?"])
         self.assertEqual(view.title_segments(200)[0][1:], portly.summary_segments(view.groups))
         view.handle("K")
         self.assertEqual(view.confirm[0], "Stop 1 port of shop wt fix/cart?")
