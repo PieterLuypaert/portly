@@ -9,6 +9,7 @@
   portly kill 3000     stop what listens on it: the process, or its container
   portly kill wt1      stop everything of a project or stack, after asking
   portly restart 3000  stop it and start it again the way it was started
+  portly up wt1        start the ports of a stack that are down, the way wt started them
   portly open 3000     open http://localhost:3000 in the browser (https for symfony)
   portly logs 3000     follow its output: docker logs, or the file it writes to
   portly free 3000     the first free port from 3000 on
@@ -22,7 +23,9 @@ of its own next to the main checkout of its repo. A port that Docker forwards
 is named after its container and belongs to the checkout of its compose
 project, except a stack that wt started (compose project <name>-wt<n>): that
 belongs to its worktree, found in wt's registry, .git/<name>-worktrees/<n>.env.
-A port of such a stack that nothing listens on shows as down, with wt's log.
+A port of such a stack that nothing listens on shows as down, with wt's log,
+and starts again with what wt_cfg_dev_cmd in the repo's wt.config gives for
+it, or with what portly live saw run on it.
 Colour is dropped with NO_COLOR or when the output is not a terminal.
 """
 import argparse
@@ -1350,6 +1353,10 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
     if item.is_down:
         since = f" · since {started_at(int(time.time() - item.down_since))}" if item.down_since else ""
         add("state", "down", GONE, "nothing listens on it" + since)
+        if item.start:
+            add("start", start_summary(item))
+        elif item.start_problem:
+            add("start", "not possible", DIM, item.start_problem)
         add("output", output_of(item))
         for number, line in enumerate(item.last_output):
             add("last lines" if number == 0 else "", line, GONE if number == len(item.last_output) - 1 else DIM)
@@ -1396,7 +1403,7 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
 
 def hints_for(item: Listener) -> List[str]:
     if item.is_down:
-        return [f"portly logs {item.port}"] if item.log else []
+        return ([f"portly up {item.port}"] if item.start else []) + ([f"portly logs {item.port}"] if item.log else [])
     hints = []
     if url_of(item):
         hints.append(f"portly open {item.port}")
@@ -1695,6 +1702,11 @@ def restart_summary(item: Listener, rows: List[Listener]) -> str:
     return text + (f" (also {', '.join(map(str, others))})" if others else "")
 
 
+def start_summary(item: Listener) -> str:
+    """What starting a down port runs, for the detail views and the question."""
+    return f"{shown_command(item.start)} in {tilde(item.start.cwd)}" if item.start else ""
+
+
 def show_ports(ports: List[int], rows: List[Listener], paint: Paint) -> int:
     by_port = {item.port: item for item in rows}
     lines = []
@@ -1731,6 +1743,19 @@ def confirm(question: str) -> Optional[bool]:
         return False
 
 
+def refused(verb: str, done: str, count: int, ask) -> Optional[int]:
+    """Ask before acting on count ports: None on yes, else the exit code, 2
+    when there is no one to ask and 1 on a no."""
+    answer = ask(f"  {verb.capitalize()} {plural(count, 'port', 'ports')}? [y/N] ")
+    if answer is None:
+        print(f"  No terminal to ask: add -y to {verb} without asking.\n", file=sys.stderr)
+        return 2
+    if not answer:
+        print(f"  Nothing {done}.\n")
+        return 1
+    return None
+
+
 def kill(rows: List[Listener], ports: List[int], terms: List[str], sure: bool, paint: Paint,
          ask=confirm) -> int:
     """Stop the asked ports at once; a project or stack only after a yes."""
@@ -1742,13 +1767,9 @@ def kill(rows: List[Listener], ports: List[int], terms: List[str], sure: bool, p
     if terms and not sure:
         width = terminal_width()
         print("\n" + "\n".join(render_groups(group_rows(targets), paint, width)) + "\n", flush=True)
-        answer = ask(f"  Stop {plural(len(targets), 'port', 'ports')}? [y/N] ")
-        if answer is None:
-            print("  No terminal to ask: add -y to stop without asking.\n", file=sys.stderr)
-            return 2
-        if not answer:
-            print("  Nothing stopped.\n")
-            return 1
+        code = refused("stop", "stopped", len(targets), ask)
+        if code is not None:
+            return code
     results = stop_many(targets) if targets else {}
     port_w = max([len(str(item.port)) for item in targets] + [0])
     for item in targets:
@@ -1786,13 +1807,9 @@ def restart(rows: List[Listener], ports: List[int], terms: List[str], sure: bool
     print("\n" + "\n".join(plan_lines) + "\n", flush=True)
     doable = [item for item in targets if item.container or item.restart]
     if terms and not sure and doable:
-        answer = ask(f"  Restart {plural(len(doable), 'port', 'ports')}? [y/N] ")
-        if answer is None:
-            print("  No terminal to ask: add -y to restart without asking.\n", file=sys.stderr)
-            return 2
-        if not answer:
-            print("  Nothing restarted.\n")
-            return 1
+        code = refused("restart", "restarted", len(doable), ask)
+        if code is not None:
+            return code
     if doable and sys.stdout.isatty():
         print(paint(DIM, "  restarting, waiting until everything listens again…"), flush=True)
     results = restart_many(doable) if doable else {}
@@ -1806,6 +1823,48 @@ def restart(rows: List[Listener], ports: List[int], terms: List[str], sure: bool
     if lines:
         print("\n".join(lines) + "\n")
     return 1 if any(results.values()) or len(doable) < len(targets) else 0
+
+
+def bring_up(rows: List[Listener], ports: List[int], terms: List[str], sure: bool, paint: Paint,
+             ask=confirm) -> int:
+    """Start the asked ports of wt stacks that are down, the way wt started
+    them; a project or stack only after a yes. What runs is left alone."""
+    targets, free = pick_targets(rows, ports, terms)
+    if terms and not targets:
+        print(f"\n  Nothing found for {' '.join(terms)}.\n")
+        return 1
+    lines = [f"  {paint(BOLD, str(port))} is not a port of a wt stack that is down." for port in free]
+    lines += [f"  {paint(BOLD, str(item.port))} {label(item)} runs already."
+              for item in targets if not item.is_down and item.port in ports]
+    down = [item for item in targets if item.is_down]
+    if terms and not down:
+        lines.append(f"  Nothing is down in {' '.join(terms)}.")
+    port_w = max([len(str(item.port)) for item in down] + [0])
+    if down:
+        print("\n" + "\n".join(start_plan_lines(down, port_w, paint)) + "\n", flush=True)
+    doable = [item for item in down if item.start]
+    if terms and not sure and doable:
+        code = refused("start", "started", len(doable), ask)
+        if code is not None:
+            return code
+    if doable and sys.stdout.isatty():
+        print(paint(DIM, "  starting, waiting until it listens…"), flush=True)
+    results = start_many(doable) if doable else {}
+    for item in doable:
+        name, problem = paint(BOLD, str(item.port).rjust(port_w)), results[item.port]
+        lines.append(f"  {name} {paint(GONE, problem)}" if problem else
+                     f"  {name} {paint(FREE, 'listens')}.  {paint(DIM, label(item))}")
+    print(("" if down else "\n") + "\n".join(lines) + "\n")
+    return 1 if free or any(results.values()) or len(doable) < len(down) else 0
+
+
+def start_plan_lines(down: List[Listener], port_w: int, paint: Paint) -> List[str]:
+    """Per down port what starts it, or why it cannot start."""
+    lines = []
+    for item in down:
+        what = paint(DIM, start_summary(item)) if item.start else paint(GONE, f"not possible: {item.start_problem}")
+        lines.append(f"  {paint(BOLD, str(item.port).rjust(port_w))}  {label(item)}  {what}")
+    return lines
 
 
 def logs_command(item: Listener, lines: int, follow: bool) -> Optional[List[str]]:
@@ -1881,7 +1940,8 @@ def port_number(text: str) -> int:
 def as_json(item: Listener, deep: bool = False) -> dict:
     """One port as plain data; fields that do not apply are null. deep adds
     what only the detail views read: log, parent, connections and restart.
-    A down port has no process, so only its log, which is wt's."""
+    A down port has no process, so only its log, which is wt's, and how it
+    starts again."""
     place, stack, container = item.place, item.stack, item.container
     process = not container and not item.is_down
     data = {
@@ -1910,12 +1970,15 @@ def as_json(item: Listener, deep: bool = False) -> dict:
         "last_lines": item.last_output if item.is_down else None,
     }
     if deep:
-        plan = item.restart
         data.update(log=item.log or None, parent=item.parent or None,
                     connections=None if item.is_down else item.connections,
-                    restart=plan and {"command": plan.argv, "cwd": plan.cwd, "log": plan.log, "env": plan.env},
-                    restart_problem=item.restart_problem or None)
+                    restart=plan_json(item.restart), restart_problem=item.restart_problem or None,
+                    start=plan_json(item.start), start_problem=item.start_problem or None)
     return data
+
+
+def plan_json(plan: Optional[Restart]) -> Optional[dict]:
+    return plan and {"command": plan.argv, "cwd": plan.cwd, "log": plan.log, "env": plan.env}
 
 
 def split_targets(words: List[str]) -> Tuple[List[int], List[str]]:
@@ -2577,6 +2640,7 @@ HELP = """\
   portly kill 3000 8000    stop what listens there
   portly kill wt1          stop everything of a project or stack (asks first)
   portly restart 3000      stop it and start it again the way it was started (also: restart wt1)
+  portly up wt1            start the ports of a wt stack that are down, the way wt started them
   portly open 3000/admin   open http://localhost:3000/admin in your browser (https for symfony)
   portly logs 3000         follow its output: docker logs, or the file it writes to
   portly free 3000         the first free port from 3000 on
@@ -2628,6 +2692,8 @@ def cmd_show(argv: List[str]) -> int:
         parser.error(f"unrecognized arguments: {' '.join(rest)}")
     ports, terms = targets_of(parser, args.targets)
     rows = with_down_ports(one_per_port(read_listeners(deep=bool(ports))))
+    if ports:
+        add_start_plans([item for item in rows if item.port in ports])
     if args.json:
         chosen = [item for item in rows if item.port in ports] if ports else visible(rows, terms, args.all)
         print(json.dumps([as_json(item, deep=bool(ports)) for item in chosen], indent=2, ensure_ascii=False))
@@ -2666,6 +2732,17 @@ def cmd_restart(argv: List[str]) -> int:
     args = parser.parse_args(argv)
     ports, terms = targets_of(parser, args.targets)
     return restart(one_per_port(read_listeners(deep=True)), ports, terms, args.yes, paint_for_stdout())
+
+
+def cmd_up(argv: List[str]) -> int:
+    parser = parser_for("up", "Start the ports of a wt stack that are down, the way wt started them.")
+    parser.add_argument("targets", nargs="+", metavar="port|stack")
+    parser.add_argument("-y", "--yes", action="store_true", help="start a stack's ports without asking")
+    args = parser.parse_args(argv)
+    ports, terms = targets_of(parser, args.targets)
+    rows = with_down_ports(one_per_port(read_listeners()))
+    add_start_plans(pick_targets(rows, ports, terms)[0])
+    return bring_up(rows, ports, terms, args.yes, paint_for_stdout())
 
 
 def cmd_open(argv: List[str]) -> int:
@@ -2782,8 +2859,8 @@ def cmd_live(argv: List[str]) -> int:
     return 0
 
 
-COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_restart, "open": cmd_open,
-            "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
+COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_restart, "up": cmd_up,
+            "open": cmd_open, "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
             # The Dutch names from its days as poort, so scripts and habits keep working.
             "lijst": cmd_show, "herstart": cmd_restart, "vrij": cmd_free, "wacht": cmd_wait}
 

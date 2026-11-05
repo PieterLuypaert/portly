@@ -1231,6 +1231,58 @@ class DownPortTest(unittest.TestCase):
         view.run_in_background = lambda action, targets: self.acted.append((action, [i.port for i in targets]))
         return view
 
+    def with_plans(self):
+        """The rows, the api with a plan to start it and the mail without one."""
+        rows = portly.with_down_ports(self.rows)
+        by_port = {item.port: item for item in rows}
+        by_port[20111].start = portly.Restart(["bash", "-c", "pnpm dev --port 20111"], self.tree, [], self.log,
+                                              self.stack.pid_file("api"), kind="start")
+        by_port[20112].start_problem = "wt starts no server for mail"
+        return rows
+
+    def test_a_down_port_tells_how_it_starts(self):
+        by_port = {item.port: item for item in self.with_plans()}
+        api, mail = by_port[20111], by_port[20112]
+        fields = {key: (value, note) for key, value, _, note in portly.detail_fields(api)}
+        self.assertEqual(fields["start"], (f"pnpm dev --port 20111 in {portly.tilde(self.tree)}", ""))
+        fields = {key: (value, note) for key, value, _, note in portly.detail_fields(mail)}
+        self.assertEqual(fields["start"], ("not possible", "wt starts no server for mail"))
+        self.assertEqual(portly.hints_for(api), ["portly up 20111", "portly logs 20111"])
+        self.assertEqual(portly.hints_for(mail), [])
+        self.assertEqual(portly.as_json(api, deep=True)["start"]["command"], ["bash", "-c", "pnpm dev --port 20111"])
+        self.assertEqual((portly.as_json(mail, deep=True)["start"], portly.as_json(mail, deep=True)["start_problem"]),
+                         (None, "wt starts no server for mail"))
+
+    def up(self, ports, terms, sure=False, answer=True):
+        asked, started, out = [], [], io.StringIO()
+        self.addCleanup(setattr, portly, "start_many", portly.start_many)
+        portly.start_many = lambda rows: started.extend(item.port for item in rows) or {
+            item.port: None for item in rows}
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = portly.bring_up(self.with_plans(), ports, terms, sure, portly.Paint(False),
+                                   ask=lambda question: asked.append(question) or answer)
+        return code, asked, started, out.getvalue()
+
+    def test_up_starts_a_stack_s_down_ports_after_a_yes(self):
+        code, asked, started, out = self.up([], ["wt1"])
+        self.assertEqual((code, asked, started), (1, ["  Start 1 port? [y/N] "], [20111]))
+        self.assertIn(f"20111  api  pnpm dev --port 20111 in {portly.tilde(self.tree)}", out)
+        self.assertIn("20112  mail  not possible: wt starts no server for mail", out)
+        self.assertIn("20111 listens.", out)
+        self.assertEqual(self.up([], ["wt1"], answer=False)[:3], (1, ["  Start 1 port? [y/N] "], []))
+        self.assertEqual(self.up([], ["wt1"], answer=None)[0], 2)
+        self.assertEqual(self.up([], ["wt1"], sure=True)[:3], (1, [], [20111]))
+
+    def test_up_starts_an_asked_port_at_once_and_leaves_what_runs(self):
+        self.assertEqual(self.up([20111], [])[:3], (0, [], [20111]))
+        code, asked, started, out = self.up([20110, 20999], [])
+        self.assertEqual((code, asked, started), (1, [], []))
+        self.assertIn("20110 vite runs already.", out)
+        self.assertIn("20999 is not a port of a wt stack that is down.", out)
+        code, _, started, out = self.up([], ["blog"])
+        self.assertEqual((code, started, out.strip()), (0, [], "Nothing is down in blog."))
+        self.assertEqual(self.up([], ["nope"])[0], 1)
+
     def test_the_live_view_stops_and_restarts_no_down_port(self):
         view = self.view()
         for key in ("down", "down"):
@@ -2209,7 +2261,7 @@ class CommandTest(unittest.TestCase):
             "port", "name", "down", "url", "addresses", "local_only", "project", "stack", "container", "pid",
             "last_lines",
             "command", "cwd", "folder_gone", "running_seconds", "memory_kb", "others",
-            "log", "parent", "connections", "restart", "restart_problem"]))
+            "log", "parent", "connections", "restart", "restart_problem", "start", "start_problem"]))
 
     def test_kill_frees_a_port_and_knows_a_free_one(self):
         _, port = self.serve()
@@ -2219,6 +2271,10 @@ class CommandTest(unittest.TestCase):
         self.assertIn(f"{port} is free.", out)
         self.assertIn(f"{free} is already free.", out)
         self.assertEqual(portly.listening_pids(port), [])
+
+    def test_up_finds_nothing_for_a_stack_that_does_not_run(self):
+        code, out, _ = self.call("up", "wt98765")
+        self.assertEqual((code, out.strip()), (1, "Nothing found for wt98765."))
 
     def test_kill_by_word_needs_yes_without_a_terminal(self):
         _, port = self.serve()
