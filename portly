@@ -11,6 +11,7 @@
   portly restart 3000  stop it and start it again the way it was started
   portly up wt1        start the ports of a stack that are down, the way wt started them,
                        or an idle worktree's stack with wt up
+  portly forget shop   stop showing shop's idle worktrees, until something runs in it
   portly open 3000     open http://localhost:3000 in the browser (https for symfony)
   portly logs 3000     follow its output: docker logs, or the file it writes to
   portly free 3000     the first free port from 3000 on
@@ -3026,6 +3027,7 @@ HELP = """\
   portly restart 3000      stop it and start it again the way it was started (also: restart wt1)
   portly up wt1            start the ports of a wt stack that are down, the way wt started them
                            (an idle worktree's stack: wt up)
+  portly forget shop       stop showing shop's idle worktrees, until something runs in it
   portly open 3000/admin   open http://localhost:3000/admin in your browser (https for symfony)
   portly logs 3000         follow its output: docker logs, or the file it writes to
   portly free 3000         the first free port from 3000 on
@@ -3130,6 +3132,26 @@ def cmd_up(argv: List[str]) -> int:
     rows = with_idle_worktrees(with_down_ports(one_per_port(read_listeners())))
     add_start_plans(pick_targets(rows, ports, terms)[0])
     return bring_up(rows, ports, terms, args.yes, paint_for_stdout())
+
+
+def cmd_forget(argv: List[str]) -> int:
+    parser = parser_for("forget", "Stop showing a repo's idle worktrees, until something runs in it again.")
+    parser.add_argument("repos", nargs="+", metavar="repo", help="a repo's name, or the folder of its main checkout")
+    args = parser.parse_args(argv)
+    paint, known, lines, unknown = paint_for_stdout(), read_known_repos(), [], False
+    kept = list(known)
+    for name in args.repos:
+        gone = [common for common in kept if name in (repo_name(common), main_checkout(common))
+                or os.path.realpath(name) == main_checkout(common)]
+        kept = [common for common in kept if common not in gone]
+        unknown = unknown or not gone
+        lines += [f"  Forgot {paint(BOLD, repo_name(common))}  {paint(DIM, tilde(main_checkout(common)))}"
+                  for common in gone] or [f"  portly does not know {paint(BOLD, name)}."]
+    if kept != known:
+        write_known_repos(kept)
+        lines.append(paint(DIM, "  Its worktrees show again once something runs in it."))
+    print("\n" + "\n".join(lines) + "\n")
+    return 1 if unknown else 0
 
 
 def cmd_open(argv: List[str]) -> int:
@@ -3247,7 +3269,7 @@ def cmd_live(argv: List[str]) -> int:
 
 
 COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_restart, "up": cmd_up,
-            "open": cmd_open, "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
+            "forget": cmd_forget, "open": cmd_open, "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
             # The Dutch names from its days as poort, so scripts and habits keep working.
             "lijst": cmd_show, "herstart": cmd_restart, "vrij": cmd_free, "wacht": cmd_wait}
 

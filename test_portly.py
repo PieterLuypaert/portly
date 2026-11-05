@@ -2826,6 +2826,15 @@ class IdleWorktreeTest(unittest.TestCase):
         self.assertIn(f"wt3  idle  wt up feat/old in {portly.tilde(self.main)}", out.getvalue())
         self.assertIn("wt3 is up.", out.getvalue())
 
+    def test_forget_drops_a_repo_until_something_runs_in_it(self):
+        portly.remember_repos([self.busy])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(portly.main(["forget", "shop", "nope"]), 1)
+        self.assertIn(f"Forgot shop  {portly.tilde(self.main)}", out.getvalue())
+        self.assertIn("portly does not know nope.", out.getvalue())
+        self.assertEqual(portly.read_known_repos(), [])
+
 
 class FuzzTest(unittest.TestCase):
     """Random input in the shapes the tools really produce, with random content
