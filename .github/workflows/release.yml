@@ -1,0 +1,28 @@
+name: release
+
+# Pushing a tag such as v1.0.0 builds the one-file portly and attaches it to
+# a GitHub release; the README installs it from releases/latest.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
+      - run: sudo apt-get update -q && sudo apt-get install -y -q lsof
+      - run: python3 -m unittest
+      - run: sh scripts/build-one-file
+      - run: sh scripts/smoke-one-file
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/portly --title "$GITHUB_REF_NAME" --generate-notes

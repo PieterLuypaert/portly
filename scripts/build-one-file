@@ -1,0 +1,14 @@
+#!/bin/sh
+# Builds dist/portly: all of src/portly in one file that runs with python3 (a
+# zipapp), as a release ships it. Its __main__ is src/portly/__main__.py, which
+# exits with main()'s code; zipapp's own --main would always exit 0.
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+cp -R "$root/src/portly" "$stage/portly"
+cp "$root/src/portly/__main__.py" "$stage/__main__.py"
+find "$stage" -name __pycache__ -type d -prune -exec rm -rf {} +
+mkdir -p "$root/dist"
+"${PYTHON:-python3}" -m zipapp "$stage" --python "/usr/bin/env python3" --output "$root/dist/portly"
+echo "built $root/dist/portly"

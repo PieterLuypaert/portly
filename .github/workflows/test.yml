@@ -44,3 +44,10 @@ jobs:
         run: |
           "$PYTHON" --version
           "$PYTHON" -m unittest -v
+      # The one file a release ships, built and run the way someone installs it.
+      - name: one-file portly
+        env:
+          PYTHON: ${{ matrix.python == 'system' && '/usr/bin/python3' || 'python3' }}
+        run: |
+          sh scripts/build-one-file
+          sh scripts/smoke-one-file
