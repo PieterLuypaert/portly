@@ -2658,17 +2658,28 @@ class LiveView:
         if not command:
             self.say(f"does not write to a file: {output_of(item)}" if item else "", DIM)
             return
+
+        def follow() -> None:
+            print(f"\n\033[90m── {item.port} {label(item)} · ctrl-c takes you back ──\033[0m\n", flush=True)
+            subprocess.run(command, check=False)
+
+        self.outside(follow)
+
+    def outside(self, action: Callable[[], object]) -> object:
+        """Put the view away, run action on the plain terminal and draw the
+        view again; what action gives, or None after a ctrl-c, which leaves
+        what action runs, not portly."""
         terminal_write(MOUSE_OFF)
         curses.def_prog_mode()
         curses.endwin()
-        print(f"\n\033[90m── {item.port} {label(item)} · ctrl-c takes you back ──\033[0m\n", flush=True)
         try:
-            subprocess.run(command, check=False)
+            return action()
         except KeyboardInterrupt:
-            pass  # ctrl-c is how you leave the logs
-        curses.reset_prog_mode()
-        terminal_write(MOUSE_ON)
-        self.screen.clear()
+            return None  # how you leave the logs, or an editor that waits
+        finally:
+            curses.reset_prog_mode()
+            terminal_write(MOUSE_ON)
+            self.screen.clear()
 
     def is_busy(self) -> bool:
         """Whether a stop, restart or start still runs, and if so, say so: one
