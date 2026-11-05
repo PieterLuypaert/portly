@@ -1156,6 +1156,11 @@ def header_segments(group: Group, width: int) -> List[Segment]:
     return segments
 
 
+def group_name(group: Group) -> str:
+    """A group as a question names it: shop wt fix/cart."""
+    return f"{group.title} {branch_text(group.branch, group.is_worktree)}".strip()
+
+
 def up_text(stack: Stack) -> str:
     return f"{stack.up}/{stack.of} up"
 
@@ -2071,12 +2076,14 @@ class Scanner(threading.Thread):
         self.scanned_at = 0.0
         self.error = ""
         self.clock = DownClock()
+        self.seen: Seen = {}  # how each stack port it saw run was started, to start it once it is down
 
     def run(self) -> None:
         while True:
             try:
                 rows = with_down_ports(one_per_port(read_listeners(deep=True)))
                 self.clock.update(rows)
+                add_start_plans(rows, self.seen)
             except Exception as error:  # the view stays up and shows what went wrong
                 with self.lock:
                     self.error = f"scan failed: {error}"
@@ -2224,8 +2231,8 @@ class LiveView:
     """portly live: the grouped list on top, the selected port below, keys at the bottom."""
 
     # The key row: only the keys that do something for the selected row.
-    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("r", "restart"), ("k", "stop"),
-            ("RK", "stack"), ("?", "keys")]
+    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("r", "restart"), ("k", "stop"), ("u", "start"),
+            ("RKU", "stack"), ("?", "keys")]
     # What ? lists: every key.
     ALL_KEYS = [
         ("↑↓ pgup pgdn home end", "select a port; a click selects one, the wheel scrolls"),
@@ -2234,7 +2241,9 @@ class LiveView:
         ("l", "follow its output"),
         ("r", "restart it the way it was started"),
         ("k", "stop it"),
+        ("u", "start a stack's port that is down, the way wt started it"),
         ("R K", "restart or stop every port of its stack or project"),
+        ("U", "start every port of its stack that is down; what runs keeps running"),
         ("/", "filter by project, branch, folder or tool; enter keeps it"),
         ("esc", "clear the filter"),
         ("a", "show apps and helper processes too, or hide them again"),
@@ -2335,25 +2344,30 @@ class LiveView:
         terminal_write(MOUSE_ON)
         self.screen.clear()
 
+    def is_busy(self) -> bool:
+        """Whether a stop, restart or start still runs, and if so, say so: one
+        at a time, as two could act on the same port, and the first to end
+        would hide the other."""
+        with self.busy_lock:
+            if self.busy:
+                self.say("still busy, one stop, restart or start at a time", DIM)
+            return bool(self.busy)
+
     def ask(self, action: str, whole_group: bool) -> None:
         """Put a stop or restart question on the bottom line."""
         item, group = self.current(), self.current_group()
-        if not item or not group:
+        if not item or not group or self.is_busy():
             return
-        with self.busy_lock:
-            if self.busy:  # one at a time: two could act on the same port, and the first to end would hide the other
-                self.say("still busy, one stop or restart at a time", DIM)
-                return
         verb = "Stop" if action == "stop" else "Restart"
         if item.is_down and not whole_group:
-            self.say(f"{item.port} {label(item)} is down: nothing runs to {action}", DIM)
+            hint = "; u starts it" if item.start else ""
+            self.say(f"{item.port} {label(item)} is down: nothing runs to {action}{hint}", DIM)
             return
         if action == "restart" and not whole_group and not (item.container or item.restart):
             self.say(f"{item.port} cannot restart: {item.restart_problem or 'no restart plan'}", DIM)
             return
         if whole_group:
-            branch = branch_text(group.branch, group.is_worktree)
-            name = f"{group.title} {branch}".strip()
+            name = group_name(group)
             running = [row for row in group.rows if not row.is_down]
             if not running:  # a filter can leave only down rows
                 self.say(f"nothing runs in {name} to {action}", DIM)
@@ -2364,14 +2378,42 @@ class LiveView:
             plan = f" with {command}" if command else ""
             self.confirm = (f"{verb} {item.port} {label(item)}{plan}?", [item], action)
 
+    def ask_start(self, whole_group: bool) -> None:
+        """Put a start question on the bottom line: for the selected port when
+        it is down, or for every down port of its stack."""
+        item, group = self.current(), self.current_group()
+        if not item or not group or self.is_busy():
+            return
+        if whole_group:
+            down, name = [row for row in group.rows if row.is_down], group_name(group)
+            doable = [row for row in down if row.start]
+            if not down:
+                self.say(f"nothing is down in {name}", DIM)
+            elif not doable:
+                self.say(f"cannot start {name}: {down[0].start_problem or 'no start plan'}", DIM)
+            else:
+                count = f"{len(doable)} of " if len(doable) < len(down) else ""
+                ports = plural(len(down), "down port", "down ports")
+                self.confirm = (f"Start {count}{ports} of {name}?", doable, "start")
+        elif not item.is_down:
+            self.say(f"{item.port} {label(item)} runs already", DIM)
+        elif not item.start:
+            self.say(f"{item.port} cannot start: {item.start_problem or 'no start plan'}", DIM)
+        else:
+            self.confirm = (f"Start {item.port} {label(item)} with {shown_command(item.start)}?", [item], "start")
+
+    # What each action says while it runs.
+    BUSY = {"stop": "stopping {}", "restart": "restarting {}, waiting until it listens again",
+            "start": "starting {}, waiting until it listens"}
+
     def run_in_background(self, action: str, targets: List[Listener]) -> None:
         names = " ".join(str(item.port) for item in targets)
-        self.busy = f"stopping {names}" if action == "stop" else f"restarting {names}, waiting until it listens again"
+        self.busy = self.BUSY[action].format(names)
         self.message = ""  # the spinner line shows only what is said while it runs
 
         def work() -> None:
             try:
-                results = stop_many(targets) if action == "stop" else restart_many(targets)
+                results = {"stop": stop_many, "restart": restart_many, "start": start_many}[action](targets)
                 problems = [f"{port}: {problem}" for port, problem in results.items() if problem]
                 if problems:
                     outcome = (("still taken, " if action == "stop" else "") + "; ".join(problems), GONE)
@@ -2409,7 +2451,8 @@ class LiveView:
         moves = {"up": -1, "down": 1, "pgup": -10, "pgdn": 10, "home": -10 ** 6, "end": 10 ** 6}
         actions = {"o": self.open_selected, "enter": self.open_selected, "l": self.follow_logs,
                    "c": self.copy_selected, "k": lambda: self.ask("stop", False), "K": lambda: self.ask("stop", True),
-                   "r": lambda: self.ask("restart", False), "R": lambda: self.ask("restart", True)}
+                   "r": lambda: self.ask("restart", False), "R": lambda: self.ask("restart", True),
+                   "u": lambda: self.ask_start(False), "U": lambda: self.ask_start(True)}
         if isinstance(key, tuple):
             self.mouse(key)
         elif key in moves:
@@ -2435,7 +2478,7 @@ class LiveView:
         if key in ("y", "Y"):
             self.run_in_background(action, targets)
         else:
-            self.say("nothing stopped" if action == "stop" else "nothing restarted", DIM)
+            self.say({"stop": "nothing stopped", "restart": "nothing restarted", "start": "nothing started"}[action], DIM)
 
     def edit_filter(self, key) -> bool:
         if key == "enter":
@@ -2507,11 +2550,15 @@ class LiveView:
         group = self.current_group()
         possible = self.possible_keys()
         segments: List[Segment] = [(" ", "")]
-        for key, what in self.KEYS:
-            if key == "RK" and group and not group_stack(group):
+        for keys, what in self.KEYS:
+            if keys == "RKU" and group and not group_stack(group):
                 what = "project"
-            if key in possible:
-                segments += [(key, ACCENT), (f" {what}  ", DIM)]
+            if keys == "RKU":  # the stack keys show as one, with the letters that do something
+                shown = "".join(key for key in keys if key in possible)
+            else:
+                shown = keys if keys in possible else ""
+            if shown:
+                segments += [(shown, ACCENT), (f" {what}  ", DIM)]
         return segments, False
 
     def possible_keys(self) -> Set[str]:
@@ -2519,10 +2566,11 @@ class LiveView:
         item, group = self.current(), self.current_group()
         if not item or not group:
             return {"?"}
+        running = any(not row.is_down for row in group.rows)
         checks = {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log),
                   "r": bool(item.container or item.restart),
-                  "k": not item.is_down and not is_docker_itself(item),
-                  "RK": any(not row.is_down for row in group.rows), "?": True}
+                  "k": not item.is_down and not is_docker_itself(item), "u": bool(item.start),
+                  "R": running, "K": running, "U": any(row.start for row in group.rows), "?": True}
         return {key for key, on in checks.items() if on}
 
     def keys_lines(self) -> List[List[Segment]]:

@@ -237,7 +237,7 @@ class LiveViewTest(unittest.TestCase):
         self.press("?", "resize")
         self.assertTrue(self.view.showing_keys)
         listed = ["".join(text for text, _ in line).split()[0] for line in self.view.keys_lines()[2:]]
-        self.assertEqual(listed, ["↑↓", "o", "c", "l", "r", "k", "R", "/", "esc", "a", "?", "q"])
+        self.assertEqual(listed, ["↑↓", "o", "c", "l", "r", "k", "u", "R", "U", "/", "esc", "a", "?", "q"])
         self.press("k")
         self.assertEqual((self.view.showing_keys, self.view.confirm), (False, None))
         self.press("?", "q")
@@ -360,9 +360,9 @@ class LiveViewTest(unittest.TestCase):
         self.press("down", "k")
         self.assertIsNone(self.view.confirm)
         wide, narrow = ("".join(text for text, _ in self.view.footer_segments(width)[0])[3:] for width in (200, 60))
-        self.assertEqual(wide, "stopping 3000   still busy, one stop or restart at a time")
+        self.assertEqual(wide, "stopping 3000   still busy, one stop, restart or start at a time")
         # put leaves the last of the 60 columns empty
-        self.assertEqual(narrow, "stopping 30…   still busy, one stop or restart at a time")
+        self.assertEqual(narrow, "stop…   still busy, one stop, restart or start at a time")
         release.set()
         deadline = time.monotonic() + 2
         while self.view.busy and time.monotonic() < deadline:
@@ -1224,8 +1224,8 @@ class DownPortTest(unittest.TestCase):
         self.assertIn("· wt1", header)
         self.assertNotIn("up", header)
 
-    def view(self):
-        view = portly.LiveView(None, FakeScanner(portly.with_down_ports(self.rows)), [], False)
+    def view(self, rows=None):
+        view = portly.LiveView(None, FakeScanner(rows or portly.with_down_ports(self.rows)), [], False)
         view.pull()
         self.acted = []
         view.run_in_background = lambda action, targets: self.acted.append((action, [i.port for i in targets]))
@@ -1239,6 +1239,63 @@ class DownPortTest(unittest.TestCase):
                                               self.stack.pid_file("api"), kind="start")
         by_port[20112].start_problem = "wt starts no server for mail"
         return rows
+
+    def keys(self, view):
+        return [text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT]
+
+    def test_u_starts_a_down_port_and_U_every_down_port_of_its_stack(self):
+        view = self.view(self.with_plans())
+        view.handle("down")
+        self.assertEqual((view.selected, self.keys(view)), (20110, ["↑↓", "o", "k", "RKU", "?"]))
+        view.handle("u")
+        self.assertEqual((view.confirm, view.message), (None, "20110 vite runs already"))
+        view.handle("U")
+        self.assertEqual(view.confirm[0], "Start 1 of 2 down ports of shop wt fix/cart?")
+        view.handle("y")
+        view.handle("down")
+        view.message = ""  # the key row shows once nothing is said
+        self.assertEqual((view.selected, self.keys(view)), (20111, ["↑↓", "l", "u", "RKU", "?"]))
+        view.handle("r")
+        self.assertEqual(view.message, "20111 api is down: nothing runs to restart; u starts it")
+        view.handle("u")
+        self.assertEqual(view.confirm[0], "Start 20111 api with pnpm dev --port 20111?")
+        view.handle("y")
+        view.handle("down")
+        view.handle("u")
+        self.assertEqual((view.confirm, view.message), (None, "20112 cannot start: wt starts no server for mail"))
+        view.message = ""
+        self.assertEqual(self.keys(view), ["↑↓", "RKU", "?"])
+        for key in ("up", "u", "n"):
+            view.handle(key)
+        self.assertEqual(view.message, "nothing started")
+        self.assertEqual(self.acted, [("start", [20111]), ("start", [20111])])
+
+    def test_U_says_why_nothing_starts(self):
+        view = self.view()
+        view.handle("down")
+        self.assertEqual(self.keys(view), ["↑↓", "o", "k", "RK", "?"])
+        view.handle("U")
+        self.assertEqual((view.confirm, view.message), (None, "cannot start shop wt fix/cart: no start plan"))
+        view.handle("up")
+        view.handle("U")
+        self.assertEqual((view.confirm, view.message), (None, "nothing is down in blog main"))
+
+    def test_a_start_runs_in_the_background_until_the_port_is_back_up(self):
+        started, release = [], threading.Event()
+        self.addCleanup(release.set)
+        self.addCleanup(setattr, portly, "start_many", portly.start_many)
+        portly.start_many = lambda rows: started.append([item.port for item in rows]) or release.wait(5) and {
+            item.port: None for item in rows}
+        rows = self.with_plans()
+        view = portly.LiveView(None, FakeScanner(rows), [], False)
+        view.pull()
+        view.run_in_background("start", [item for item in rows if item.port == 20111])
+        self.assertEqual(view.busy, "starting 20111, waiting until it listens")
+        release.set()
+        deadline = time.monotonic() + 2
+        while view.busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual((started, view.message), ([[20111]], "20111 is back up"))
 
     def test_a_down_port_tells_how_it_starts(self):
         by_port = {item.port: item for item in self.with_plans()}
