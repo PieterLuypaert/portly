@@ -49,6 +49,8 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 HOME = os.path.expanduser("~")
+# portly's own files: the output of what it starts, and the repos it saw.
+CACHE = os.path.join(HOME, ".cache", "portly")
 
 # Executables that run a script: the script names the process, not the binary.
 # macOS runs python3 as .../Python.app/Contents/MacOS/Python.
@@ -187,6 +189,12 @@ def main_checkout(common: str) -> str:
     return os.path.dirname(common) if os.path.basename(common) == ".git" else common
 
 
+def repo_name(common: str) -> str:
+    """A repo's name: the folder of its main checkout, without .git."""
+    name = os.path.basename(main_checkout(common))
+    return name[:-4] if name.endswith(".git") else name
+
+
 def place_of(cwd: str) -> Optional[Place]:
     if not cwd or cwd == "/":
         return None
@@ -199,9 +207,8 @@ def place_of(cwd: str) -> Optional[Place]:
     top, common, branch = os.path.realpath(out[0]), os.path.realpath(out[1]), out[2]
     main = main_checkout(common)
     sub = os.path.relpath(os.path.realpath(cwd), top)
-    repo = os.path.basename(main)
     return Place(
-        repo=repo[:-4] if repo.endswith(".git") else repo,
+        repo=repo_name(common),
         sub="" if sub == "." else sub,
         branch=branch,
         is_worktree=top != main,
@@ -438,7 +445,7 @@ def restart_argv(args: str, cwd: str) -> Optional[List[str]]:
 
 def default_log(item: Listener) -> str:
     name = item.place.repo if item.place else re.sub(r"\W+", "-", label(item))
-    return os.path.join(HOME, ".cache", "portly", f"{name}-{item.port}.log")
+    return os.path.join(CACHE, f"{name}-{item.port}.log")
 
 
 def wt_env(stack: Stack, place: Place) -> Dict[str, str]:
@@ -802,10 +809,15 @@ def down_ports(rows: List[Listener]) -> List[Listener]:
             if port in taken or not os.path.isfile(stack.pid_file(role)):
                 continue
             taken.add(port)  # two stacks on the same ports: rows are told apart by port
-            log = stack.log_file(role) if os.path.isfile(stack.log_file(role)) else ""
-            down.append(Listener(port, 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
-                                 is_down=True, log=log, last_output=last_lines(log, 10) if log else []))
+            down.append(down_row(stack, role, place))
     return down
+
+
+def down_row(stack: Stack, role: str, place: Place) -> Listener:
+    """The row of a stack's port that nothing listens on, with wt's log for its role."""
+    log = stack.log_file(role) if os.path.isfile(stack.log_file(role)) else ""
+    return Listener(stack.ports[role], 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
+                    is_down=True, log=log, last_output=last_lines(log, 10) if log else [])
 
 
 def with_down_ports(rows: List[Listener]) -> List[Listener]:
@@ -1601,17 +1613,28 @@ def stop_tree(pids: List[int], ports: List[int], besides: Optional[Dict[int, Set
     return "the port stayed taken" if wait_for_ports(ports, 2, besides) else None
 
 
+def open_log(plan: Restart):
+    """The plan's log, opened to append, after a line that says what portly runs and when."""
+    os.makedirs(os.path.dirname(plan.log), exist_ok=True)
+    log = open(plan.log, "a")
+    log.write(f"\n── portly {plan.kind} {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
+    log.flush()
+    return log
+
+
+def plan_env(plan: Restart) -> Dict[str, str]:
+    """portly's environment with the plan's variables. wt's variables in
+    portly's own shell belong to the worktree portly runs in, not to this one."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("WT_")}
+    env.update(plan.env)
+    return env
+
+
 def start(plan: Restart) -> int:
     """Run the plan's command in its folder, detached, its output appended to
     the plan's log. The new pid goes into wt's pid file when there is one."""
-    os.makedirs(os.path.dirname(plan.log), exist_ok=True)
-    with open(plan.log, "a") as log:
-        log.write(f"\n── portly {plan.kind} {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
-        log.flush()
-        # wt's variables in portly's own shell belong to the worktree portly runs in, not to this server.
-        env = {key: value for key, value in os.environ.items() if not key.startswith("WT_")}
-        env.update(plan.env)
-        process = subprocess.Popen(plan.argv, cwd=plan.cwd, env=env, stdin=subprocess.DEVNULL, stdout=log,
+    with open_log(plan) as log:
+        process = subprocess.Popen(plan.argv, cwd=plan.cwd, env=plan_env(plan), stdin=subprocess.DEVNULL, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True)
     if plan.pidfile:
         with open(plan.pidfile, "w") as pidfile:

@@ -60,9 +60,13 @@ def _refused_docker(args, timeout):
 
 portly.send = _guarded_send
 portly.docker = _refused_docker
+# portly's own files, such as the repos it knows, go to a folder of the test run's own, never to ~/.cache.
+_CACHE = tempfile.TemporaryDirectory(prefix="portly-cache-")
+portly.CACHE = _CACHE.name
 
 
 def tearDownModule():
+    _CACHE.cleanup()
     if VIOLATIONS:
         raise AssertionError("tests reached processes they did not start: " + "; ".join(VIOLATIONS))
 
