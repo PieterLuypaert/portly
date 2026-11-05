@@ -1823,6 +1823,221 @@ class RestartTest(unittest.TestCase):
                          {port: f"not listening after 1s, see {portly.tilde(log)}"})
         self.assertIsNone(other.poll())
 
+DEV_CONFIG = """WT_PROJECT=shop
+WT_PRODUCT_NUMBER=1
+WT_SERVICES="web:0 api:1"
+LOCAL_ONLY=1
+export NODE_OPTIONS=--max-old-space-size=4096
+wt_cfg_dev_cmd() {
+  case "$1" in
+    api) echo "%s" ;;
+  esac
+}
+"""
+
+
+class StartPlanTest(unittest.TestCase):
+    """Stack wt1 of shop, in a worktree of its own; its api is down."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = os.path.realpath(tmp.name)
+        self.root, self.main, self.tree = root, os.path.join(root, "shop"), os.path.join(root, "trees", "fix-cart")
+        os.makedirs(self.tree)
+        registry = os.path.join(self.main, ".git", "shop-worktrees")
+        os.makedirs(os.path.join(registry, "logs"))
+        self.stack = portly.Stack("shop", 1, self.tree, {"web": 20110, "api": 20111}, registry, "shop_wt1")
+        self.place = portly.Place("shop", "", "fix/cart", True, self.tree, os.path.join(self.main, ".git"))
+        self.api = portly.Listener(20111, 0, "api", cwd=self.tree, place=self.place, stack=self.stack, is_down=True)
+
+    def write(self, folder, name, text=DEV_CONFIG % "python3 server.py --port $WT_PORT_API --db $WT_DB_NAME"):
+        path = os.path.join(folder, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as config:
+            config.write(text)
+        portly.DEV_COMMANDS.clear()  # two writes can share a timestamp
+        return path
+
+    def test_finds_the_wt_config_where_wt_looks(self):
+        self.assertEqual(portly.wt_config(self.stack), "")
+        legacy = self.write(self.tree, ".claude/skills/worktree-local-env/wt.config")
+        self.assertEqual(portly.wt_config(self.stack), legacy)
+        main = self.write(self.main, ".claude/wt.config")
+        self.assertEqual(portly.wt_config(self.stack), main)  # wt up runs from the main checkout
+        self.write(self.main, ".ai-tooling/config.yml", "tracker: github\nworktree: { config: tools/wt.config }\n")
+        self.assertEqual(portly.wt_config(self.stack), "")  # wt stops at a config.yml that names a missing file
+        named = self.write(self.main, "tools/wt.config")
+        self.assertEqual(portly.wt_config(self.stack), named)
+        os.remove(os.path.join(self.main, ".ai-tooling", "config.yml"))
+        self.write(self.main, ".claude/project.yml", "worktree:\n  # ours\n  config: \"tools/wt.config\"  # here\nother: 1\n")
+        self.assertEqual(portly.wt_config(self.stack), named)
+
+    def test_starts_a_role_with_what_wt_config_gives_it_and_wt_s_variables(self):
+        config = self.write(self.main, ".claude/wt.config")
+        self.addCleanup(os.environ.pop, "WT_PORT_API", None)
+        os.environ["WT_PORT_API"] = "20121"  # from the worktree portly itself runs in
+        plan, problem = portly.plan_start(self.api, {})
+        self.assertEqual(problem, "")
+        self.assertEqual((plan.argv, plan.cwd, plan.pids, plan.log, plan.pidfile, plan.kind),
+                         (["bash", "-c", "python3 server.py --port 20111 --db shop_wt1"], self.tree, [],
+                          self.stack.log_file("api"), self.stack.pid_file("api"), "start"))
+        wanted = {"WT_PROJECT": "shop", "WT_INDEX": "1", "WT_PORT_WEB": "20110", "WT_PORT_API": "20111",
+                  "WT_PRODUCT_BASE": "20100", "WT_DB_NAME": "shop_wt1", "WT_REPO_ROOT": self.tree,
+                  "WT_PRIMARY_ROOT": self.main, "WT_CONFIG_FILE": config,
+                  "WT_CONFIG_DIR": os.path.join(self.main, ".claude")}
+        self.assertEqual({key: plan.env.get(key) for key in wanted}, wanted)
+        # What the config exports reaches the server as under wt; bash's own variables do not.
+        self.assertEqual({key: value for key, value in plan.env.items() if not key.startswith("WT_")},
+                         {"NODE_OPTIONS": "--max-old-space-size=4096"})
+        self.assertEqual(portly.shown_command(plan), "python3 server.py --port 20111 --db shop_wt1")
+
+    def test_says_why_a_port_cannot_start(self):
+        self.assertEqual(portly.plan_start(self.api, {}), (None, f"no wt.config found for {portly.tilde(self.tree)}"))
+        config = self.write(self.main, ".claude/wt.config", "WT_PROJECT=shop\n")
+        self.assertEqual(portly.plan_start(self.api, {}), (None, f"{portly.tilde(config)} has no wt_cfg_dev_cmd"))
+        self.write(self.main, ".claude/wt.config", 'wt_cfg_dev_cmd() {\n  set -u\n  echo "pnpm dev $NOT_SET"\n}\n')
+        plan, problem = portly.plan_start(self.api, {})
+        self.assertIsNone(plan)
+        self.assertRegex(problem, r"^wt_cfg_dev_cmd failed for api: .*NOT_SET: unbound variable$")
+        self.write(self.main, ".claude/wt.config")
+        web = portly.replace(self.api, port=20110, command="web")
+        self.assertEqual(portly.plan_start(web, {}), (None, "wt starts no server for web"))
+        gone = portly.replace(self.api, stack=portly.Stack("shop", 1, self.tree + "-old", {"api": 20111},
+                                                            self.stack.registry))
+        self.assertEqual(portly.plan_start(gone, {}), (None, "its worktree folder is gone"))
+
+    def test_starts_what_ran_on_the_port_when_wt_config_cannot_tell(self):
+        before = portly.Restart(["pnpm", "dev"], self.tree + "/apps/api", [4120, 4121], "/x/out.log", "",
+                                "s001", {"WT_INDEX": "1"})
+        running = portly.Listener(20111, 4121, "node", cwd=self.tree, place=self.place, stack=self.stack)
+        running.restart = before
+        seen = {}
+        portly.add_start_plans([running], seen)
+        self.assertEqual(seen, {(self.stack.registry, 1, self.tree, "api"): before})
+        # wt gives a removed worktree's index to the next one: that one does not start the old command.
+        portly.add_start_plans([self.api], {(self.stack.registry, 1, self.tree + "-old", "api"): before})
+        self.assertIsNone(self.api.start)
+        portly.add_start_plans([self.api], seen)
+        self.assertEqual(self.api.start, portly.Restart(["pnpm", "dev"], self.tree + "/apps/api", [], "/x/out.log",
+                                                        self.stack.pid_file("api"), "", {"WT_INDEX": "1"}, "start"))
+        self.assertEqual(portly.shown_command(self.api.start), "pnpm dev")
+
+    def sleeper(self, cwd):
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], cwd=cwd)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        return process
+
+    def old(self):
+        return portly.old_server(self.stack, "api", portly.read_processes())
+
+    def test_stops_first_only_wt_s_old_server_that_still_runs_from_the_worktree(self):
+        self.addCleanup(setattr, portly, "STILL_STARTING", portly.STILL_STARTING)
+        portly.STILL_STARTING = 0
+        pid_file = self.stack.pid_file("api")
+        for text in ("", "not a pid", "1"):
+            with open(pid_file, "w") as written:
+                written.write(text)
+            self.assertEqual(self.old(), ([], ""))
+        for cwd, stopped in ((self.tree, True), (self.root, False)):
+            process = self.sleeper(cwd)
+            with open(pid_file, "w") as written:
+                written.write(f"{process.pid}\n")
+            self.assertEqual(self.old(), ([process.pid] if stopped else [], ""))
+        # A process that started after wt wrote the pid file got the pid when wt's server had ended.
+        long_ago = time.time() - 600
+        os.utime(pid_file, (long_ago, long_ago))
+        self.assertEqual(self.old(), ([], ""))
+
+    def test_waits_for_an_old_server_that_may_still_be_starting_up(self):
+        process = self.sleeper(self.tree)
+        with open(self.stack.pid_file("api"), "w") as written:
+            written.write(f"{process.pid}\n")
+        pids, wait = self.old()
+        self.assertEqual(pids, [])
+        self.assertRegex(wait, rf"^pid {process.pid} started \d+s ago and may still be starting up$")
+
+
+class BringUpTest(unittest.TestCase):
+    """Stack wt1 of shop runs its web; its api is down, and its wt.config
+    tells how wt starts the api. Both are throwaway servers."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = os.path.realpath(tmp.name)
+        main, self.tree = os.path.join(root, "shop"), os.path.join(root, "trees", "fix-cart")
+        os.makedirs(os.path.join(main, ".claude"))
+        os.makedirs(self.tree)
+        with open(os.path.join(self.tree, "server.py"), "w") as script:
+            script.write(SERVER)
+        with open(os.path.join(main, ".claude", "wt.config"), "w") as config:
+            config.write(DEV_CONFIG % f"exec '{sys.executable}' server.py $WT_PORT_API")
+        registry = os.path.join(main, ".git", "shop-worktrees")
+        os.makedirs(os.path.join(registry, "logs"))
+        self.web_port, self.api_port = unused_port(), unused_port()
+        while self.api_port == self.web_port:
+            self.api_port = unused_port()
+        self.stack = portly.Stack("shop", 1, self.tree, {"web": self.web_port, "api": self.api_port}, registry)
+        self.web = subprocess.Popen([sys.executable, "server.py", str(self.web_port)], cwd=self.tree,
+                                    stdout=subprocess.DEVNULL)
+        self.addCleanup(self.web.wait)
+        self.addCleanup(self.web.kill)
+        self.assertTrue(portly.wait_for_listen([self.web_port], 5)[0])
+        self.addCleanup(lambda: [portly.send(pid, portly.signal.SIGKILL) for pid in portly.listening_pids(self.api_port)
+                                 if _started_by_this_run(pid)])
+        for role, pid in (("web", self.web.pid), ("api", "")):
+            with open(self.stack.pid_file(role), "w") as written:
+                written.write(f"{pid}\n")
+        place = portly.Place("shop", "", "fix/cart", True, self.tree, os.path.join(main, ".git"))
+        self.rows = [portly.Listener(self.web_port, self.web.pid, "Python", cwd=self.tree, place=place,
+                                     stack=self.stack)]
+
+    def down_api(self):
+        rows = portly.with_down_ports(self.rows)
+        portly.add_start_plans(rows)
+        [api] = [item for item in rows if item.is_down]
+        self.assertEqual((api.port, api.start_problem), (self.api_port, ""))
+        return api
+
+    def test_starts_the_down_port_the_way_wt_does_and_leaves_what_runs(self):
+        self.assertEqual(portly.start_many([self.down_api()], timeout=10), {self.api_port: None})
+        self.assertIsNone(self.web.poll())
+        self.assertEqual(portly.listening_pids(self.web_port), [self.web.pid])
+        with open(self.stack.pid_file("api")) as written:
+            self.assertIn(int(written.read()), portly.listening_pids(self.api_port))
+        with open(self.stack.log_file("api")) as log:
+            output = log.read()
+        self.assertIn("── portly start", output)
+        self.assertIn("listening", output)
+
+    def old_server(self):
+        """wt's api server that still runs from the worktree but does not listen."""
+        old = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], cwd=self.tree)
+        self.addCleanup(old.wait)
+        self.addCleanup(old.kill)
+        with open(self.stack.pid_file("api"), "w") as written:
+            written.write(f"{old.pid}\n")
+        return old
+
+    def test_stops_what_still_runs_of_the_old_server_first(self):
+        self.addCleanup(setattr, portly, "STILL_STARTING", portly.STILL_STARTING)
+        portly.STILL_STARTING = 0
+        old = self.old_server()
+        self.assertEqual(portly.start_many([self.down_api()], timeout=10), {self.api_port: None})
+        self.assertIsNotNone(old.wait(timeout=5))
+        self.assertIsNone(self.web.poll())
+
+    def test_leaves_an_old_server_that_may_still_be_starting_up(self):
+        old = self.old_server()
+        [(port, problem)] = portly.start_many([self.down_api()], timeout=10).items()
+        self.assertEqual(port, self.api_port)
+        self.assertRegex(problem, rf"^pid {old.pid} started \d+s ago and may still be starting up$")
+        self.assertIsNone(old.poll())
+        self.assertEqual(portly.listening_pids(self.api_port), [])
+
+
 
 class FreeAndWaitTest(unittest.TestCase):
     def test_skips_taken_ports(self):
