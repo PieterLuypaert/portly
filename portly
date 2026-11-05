@@ -9,6 +9,7 @@
   portly kill 3000     stop what listens on it: the process, or its container
   portly kill wt1      stop everything of a project or stack, after asking
   portly restart 3000  stop it and start it again the way it was started
+  portly up wt1        start the ports of a stack that are down, the way wt started them
   portly open 3000     open http://localhost:3000 in the browser (https for symfony)
   portly logs 3000     follow its output: docker logs, or the file it writes to
   portly free 3000     the first free port from 3000 on
@@ -22,7 +23,9 @@ of its own next to the main checkout of its repo. A port that Docker forwards
 is named after its container and belongs to the checkout of its compose
 project, except a stack that wt started (compose project <name>-wt<n>): that
 belongs to its worktree, found in wt's registry, .git/<name>-worktrees/<n>.env.
-A port of such a stack that nothing listens on shows as down, with wt's log.
+A port of such a stack that nothing listens on shows as down, with wt's log,
+and starts again with what wt_cfg_dev_cmd in the repo's wt.config gives for
+it, or with what portly live saw run on it.
 Colour is dropped with NO_COLOR or when the output is not a terminal.
 """
 import argparse
@@ -43,7 +46,7 @@ import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 HOME = os.path.expanduser("~")
 
@@ -97,6 +100,7 @@ class Restart:
     pidfile: str = ""  # wt's pid file for this server: it gets the new pid, so wt down still finds it
     terminal: str = ""  # the tty it ran in; after the restart it runs in the background
     env: Dict[str, str] = field(default_factory=dict)  # set on top of portly's own environment
+    kind: str = "restart"  # or start, for a port that is down: what the log's header line says
 
 
 @dataclass
@@ -137,6 +141,8 @@ class Listener:
     connections: int = -1
     restart: Optional[Restart] = None
     restart_problem: str = ""  # why it cannot be restarted
+    start: Optional[Restart] = None  # a down port: how to start it again
+    start_problem: str = ""  # a down port: why it cannot be started
 
 
 def run(cmd: List[str]) -> str:
@@ -269,6 +275,18 @@ class Lookup:
         return home, None
 
 
+def read_cwds(pids: Set[int]) -> Dict[int, str]:
+    """The working folder of each of pids that still runs."""
+    cwds, pid = {}, 0
+    listed = ",".join(sorted(map(str, pids)))
+    for line in (run(["lsof", "-a", "-p", listed, "-d", "cwd", "-Fpn"]) if listed else "").splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n"):
+            cwds[pid] = line[1:]
+    return cwds
+
+
 def add_process_info(listeners: List[Listener], lookup: Lookup) -> None:
     """Fill in parent, age, command line, working folder and place."""
     pids = ",".join(sorted({str(item.pid) for item in listeners}))
@@ -277,12 +295,7 @@ def add_process_info(listeners: List[Listener], lookup: Lookup) -> None:
         parts = line.split(None, 6)
         if len(parts) == 7:
             info[int(parts[0])] = parts[1:]
-    cwds, pid = {}, 0
-    for line in run(["lsof", "-a", "-p", pids, "-d", "cwd", "-Fpn"]).splitlines():
-        if line.startswith("p"):
-            pid = int(line[1:])
-        elif line.startswith("n"):
-            cwds[pid] = line[1:]
+    cwds = read_cwds({item.pid for item in listeners})
     for item in listeners:
         if item.pid in info:
             ppid, item.elapsed, item.tty, rss, item.cpu, item.args = info[item.pid]
@@ -478,15 +491,194 @@ def add_restart_plans(listeners: List[Listener]) -> None:
     procs = read_processes()
     processes = [item for item in listeners if not item.container]
     launchers = {item.pid: launcher_of(item.pid, procs) for item in processes}
-    others = ",".join(sorted({str(pid) for pid in launchers.values() if pid not in launchers}))
-    cwds, pid = {}, 0
-    for line in (run(["lsof", "-a", "-p", others, "-d", "cwd", "-Fpn"]) if others else "").splitlines():
-        if line.startswith("p"):
-            pid = int(line[1:])
-        elif line.startswith("n"):
-            cwds[pid] = line[1:]
+    cwds = read_cwds({pid for pid in launchers.values() if pid not in launchers})
     for item in processes:
         item.restart, item.restart_problem = plan_restart(item, procs, cwds)
+
+
+# Where wt looks for its config in a checkout when config.yml names none.
+WT_CONFIGS = [".claude/wt.config", ".claude/skills/worktree-local-env/wt.config"]
+
+
+def yml_value(text: str) -> str:
+    """A YAML scalar as wt reads it: without a trailing comment and quotes."""
+    return re.sub(r"^[\"']|[\"']$", "", re.sub(r"\s+#.*$", "", text).strip())
+
+
+def named_wt_config(root: str) -> Optional[str]:
+    """The wt config a checkout's .ai-tooling/config.yml (or the older
+    .claude/project.yml) names in worktree: { config: path } or a worktree:
+    block with a config: line; None when it names none."""
+    yml = os.path.join(root, ".ai-tooling", "config.yml")
+    if not os.path.isfile(yml):
+        yml = os.path.join(root, ".claude", "project.yml")
+    try:
+        with open(yml, encoding="utf-8", errors="replace") as text:
+            lines = text.read().splitlines()
+    except OSError:
+        return None
+    in_block = False
+    for line in lines:
+        if re.match(r"worktree:\s*\{", line):
+            found = re.search(r"config:\s*([^,}]*)", line)
+            return yml_value(found.group(1)) if found else None
+        if line.startswith("worktree:"):
+            in_block = True
+        elif in_block and re.match(r"[^\s#]", line):
+            return None
+        elif in_block and re.match(r"\s+config:", line):
+            return yml_value(line.partition(":")[2])
+    return None
+
+
+def wt_config(stack: Stack) -> str:
+    """The wt.config wt reads for a stack: the first found in the main
+    checkout, where wt up runs, then in the worktree; "" when there is none."""
+    for root in (main_checkout(os.path.dirname(stack.registry)), stack.path):
+        named = named_wt_config(root)
+        if named is not None:
+            path = os.path.join(root, named)
+            return path if named and os.path.isfile(path) else ""
+        found = next((os.path.join(root, name) for name in WT_CONFIGS if os.path.isfile(os.path.join(root, name))), "")
+        if found:
+            return found
+    return ""
+
+
+# Reads a wt.config as wt does and prints what its wt_cfg_dev_cmd gives for a
+# role, then every variable wt would export to it: each ended by a NUL. Exit
+# 4: the config has no wt_cfg_dev_cmd; 5: it failed.
+DEV_COMMAND = r"""
+. "$1" >/dev/null </dev/null
+declare -F wt_cfg_dev_cmd >/dev/null || exit 4
+: "${WT_PORT_ORIGIN:=20000}" "${WT_PRODUCT_STRIDE:=100}" "${WT_PORT_STRIDE:=10}"
+WT_PRODUCT_BASE=$(( WT_PORT_ORIGIN + ${WT_PRODUCT_NUMBER:-0} * WT_PRODUCT_STRIDE ))
+export WT_PROJECT WT_PRODUCT_BASE WT_PORT_ORIGIN WT_PRODUCT_STRIDE WT_PORT_STRIDE
+command="$(wt_cfg_dev_cmd "$2" </dev/null)" || exit 5
+printf '%s\0' "$command"
+for name in $(compgen -e); do printf '%s=%s\0' "$name" "${!name}"; done
+"""
+# What bash itself exports and changes: not the config's.
+SHELL_VARIABLES = {"_", "PWD", "OLDPWD", "SHLVL"}
+# wt_cfg_dev_cmd's answers, by everything they depend on: the live view asks every scan.
+DEV_COMMANDS: Dict[tuple, Tuple[str, Dict[str, str], str]] = {}
+
+
+def dev_command(stack: Stack, role: str, config: str, place: Place) -> Tuple[str, Dict[str, str], str]:
+    """What wt runs for a stack's role, from wt_cfg_dev_cmd in its config,
+    with what wt hands it: the WT_ variables and what the config exports.
+    Else why that cannot be told."""
+    try:
+        changed = os.stat(config).st_mtime_ns
+    except OSError as error:
+        return "", {}, f"cannot read {tilde(config)}: {error.strerror}"
+    key = (config, changed, stack.name, stack.index, stack.path, tuple(sorted(stack.ports.items())), stack.db,
+           place.common, role)
+    if key not in DEV_COMMANDS:
+        DEV_COMMANDS[key] = ask_dev_command(stack, role, config, place)
+    return DEV_COMMANDS[key]
+
+
+def ask_dev_command(stack: Stack, role: str, config: str, place: Place) -> Tuple[str, Dict[str, str], str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("WT_")}
+    env.update(wt_env(stack, place), WT_CONFIG_FILE=config,
+               WT_CONFIG_DIR=os.path.realpath(os.path.dirname(config)))
+    try:
+        done = subprocess.run(["bash", "-c", DEV_COMMAND, "portly", config, role], cwd=stack.path, env=env,
+                              capture_output=True, text=True, errors="replace", timeout=10)
+    except subprocess.TimeoutExpired:
+        return "", {}, f"{tilde(config)} did not answer within 10s"
+    except OSError as error:
+        return "", {}, f"cannot read {tilde(config)}: {error.strerror}"
+    said = (done.stderr.strip().splitlines() or [""])[-1]
+    if done.returncode == 4:
+        return "", {}, said or f"{tilde(config)} has no wt_cfg_dev_cmd"
+    if done.returncode:
+        return "", {}, f"wt_cfg_dev_cmd failed for {role}" + (f": {said}" if said else "")
+    command, *pairs = done.stdout.split("\0")
+    if not command.strip():
+        return "", {}, f"wt starts no server for {role}"
+    exported = dict(pair.partition("=")[::2] for pair in pairs if "=" in pair)
+    return command, {name: value for name, value in exported.items() if name not in SHELL_VARIABLES
+                     and (name.startswith("WT_") or env.get(name) != value)}, ""
+
+
+# A server that started this recently may still be starting up.
+STILL_STARTING = 60
+
+
+def old_server(stack: Stack, role: str, procs: Dict[int, Tuple[int, str]]) -> Tuple[List[int], str]:
+    """What to stop before a down port starts: the server wt's pid file names
+    for its role, with what runs under it, while it runs from the worktree,
+    such as a watcher whose server crashed. A pid file outlives its server,
+    so its pid only counts when that process started before the file was
+    written; a later one got the pid after the server ended. Else the reason
+    to wait: a server that started a moment ago may still be starting up."""
+    path = stack.pid_file(role)
+    try:
+        with open(path) as text:
+            pid = int(text.read().strip())
+        written = os.path.getmtime(path)
+    except (OSError, ValueError):
+        return [], ""
+    age = etime_seconds(run(["ps", "-o", "etime=", "-p", str(pid)])) if pid > 1 and pid in procs else None
+    if age is None or time.time() - age > written + 2:
+        return [], ""
+    cwd, tree = read_cwds({pid}).get(pid, ""), os.path.realpath(stack.path)
+    if cwd != tree and not cwd.startswith(tree + os.sep):
+        return [], ""
+    if age < STILL_STARTING:
+        return [], f"pid {pid} started {age}s ago and may still be starting up"
+    return [pid] + descendants(pid, procs), ""
+
+
+# Restart plans of the stack ports a scan saw running, by registry, stack
+# index, worktree and role: wt gives a removed worktree's index to the next.
+Seen = Dict[Tuple[str, int, str, str], Restart]
+
+
+def seen_key(item: Listener) -> Tuple[str, int, str, str]:
+    stack = item.stack
+    return stack.registry, stack.index, stack.path, stack.role_of(item.port)
+
+
+def plan_start(item: Listener, seen: Seen) -> Tuple[Optional[Restart], str]:
+    """How to start a down port of a wt stack again: what wt runs for its
+    role, else what ran on it while portly watched; or why it cannot. What
+    to stop first is only known when it starts: see old_server."""
+    stack, role = item.stack, item.stack.role_of(item.port)
+    if not os.path.isdir(stack.path):
+        return None, "its worktree folder is gone"
+    config = wt_config(stack)
+    problem = f"no wt.config found for {tilde(stack.path)}"
+    if config:
+        command, env, problem = dev_command(stack, role, config, item.place)
+        if command:
+            return Restart(["bash", "-c", command], stack.path, [], stack.log_file(role), stack.pid_file(role),
+                           env=env, kind="start"), ""
+    before = seen.get(seen_key(item))
+    if before:
+        return replace(before, pids=[], pidfile=stack.pid_file(role), terminal="", kind="start"), ""
+    return None, problem
+
+
+def add_start_plans(rows: List[Listener], seen: Optional[Seen] = None) -> None:
+    """Give each down port among rows how to start it again. seen keeps the
+    restart plan of every stack port that runs, for when it goes down."""
+    seen = {} if seen is None else seen
+    for item in rows:
+        if item.stack and item.stack.role_of(item.port) and item.restart and not item.is_down:
+            seen[seen_key(item)] = item.restart
+    for item in rows:
+        if item.is_down:
+            item.start, item.start_problem = plan_start(item, seen)
+
+
+def shown_command(plan: Restart) -> str:
+    """A plan's command as you would type it: wt's for a start, else without paths."""
+    if plan.argv[:2] == ["bash", "-c"] and len(plan.argv) == 3:
+        return plan.argv[2]
+    return short_command(" ".join(plan.argv))
 
 
 def add_deep_info(listeners: List[Listener]) -> None:
@@ -964,6 +1156,11 @@ def header_segments(group: Group, width: int) -> List[Segment]:
     return segments
 
 
+def group_name(group: Group) -> str:
+    """A group as a question names it: shop wt fix/cart."""
+    return f"{group.title} {branch_text(group.branch, group.is_worktree)}".strip()
+
+
 def up_text(stack: Stack) -> str:
     return f"{stack.up}/{stack.of} up"
 
@@ -1161,6 +1358,10 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
     if item.is_down:
         since = f" · since {started_at(int(time.time() - item.down_since))}" if item.down_since else ""
         add("state", "down", GONE, "nothing listens on it" + since)
+        if item.start:
+            add("start", start_summary(item))
+        elif item.start_problem:
+            add("start", "not possible", DIM, item.start_problem)
         add("output", output_of(item))
         for number, line in enumerate(item.last_output):
             add("last lines" if number == 0 else "", line, GONE if number == len(item.last_output) - 1 else DIM)
@@ -1207,7 +1408,7 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
 
 def hints_for(item: Listener) -> List[str]:
     if item.is_down:
-        return [f"portly logs {item.port}"] if item.log else []
+        return ([f"portly up {item.port}"] if item.start else []) + ([f"portly logs {item.port}"] if item.log else [])
     hints = []
     if url_of(item):
         hints.append(f"portly open {item.port}")
@@ -1405,7 +1606,7 @@ def start(plan: Restart) -> int:
     the plan's log. The new pid goes into wt's pid file when there is one."""
     os.makedirs(os.path.dirname(plan.log), exist_ok=True)
     with open(plan.log, "a") as log:
-        log.write(f"\n── portly restart {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
+        log.write(f"\n── portly {plan.kind} {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
         log.flush()
         # wt's variables in portly's own shell belong to the worktree portly runs in, not to this server.
         env = {key: value for key, value in os.environ.items() if not key.startswith("WT_")}
@@ -1423,6 +1624,28 @@ def restart_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optiona
     process is stopped with its launcher and the launcher runs again. A
     launcher that serves several ports (turbo) restarts once. Per port None
     once it listens again, else the reason."""
+    return run_plans(rows, lambda item: (item.restart, item.restart_problem or "no restart plan"), timeout)
+
+
+def start_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optional[str]]:
+    """Start down ports of wt stacks by their start plans, after stopping what
+    still runs of their old server. Per port None once it listens, else the reason."""
+    procs = read_processes()
+
+    def plan_of(item: Listener) -> Tuple[Optional[Restart], str]:
+        if not item.start:
+            return None, item.start_problem or "no start plan"
+        pids, wait = old_server(item.stack, item.stack.role_of(item.port), procs)
+        return (None, wait) if wait else (replace(item.start, pids=pids), "")
+
+    return run_plans(rows, plan_of, timeout)
+
+
+def run_plans(rows: List[Listener], plan_of: Callable[[Listener], Tuple[Optional[Restart], str]],
+              timeout: float) -> Dict[int, Optional[str]]:
+    """Docker restarts the containers among rows; for every other row,
+    plan_of gives its plan, whose pids stop before its command runs, or why
+    it has none. Rows that share a launcher run it once."""
     results: Dict[int, Optional[str]] = {}
     containers = [item for item in rows if item.container]
     if containers:
@@ -1435,10 +1658,12 @@ def restart_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optiona
     for item in rows:
         if item.container:
             continue
-        if not item.restart:
-            results[item.port] = item.restart_problem or "no restart plan"
+        plan, problem = plan_of(item)
+        if not plan:
+            results[item.port] = problem
             continue
-        plans.setdefault(item.restart.pids[0], (item.restart, []))[1].append(item)
+        # A start may have nothing to stop first: such a plan is its own.
+        plans.setdefault(plan.pids[0] if plan.pids else id(plan), (plan, []))[1].append(item)
     besides = others_on_ports([pid for plan, _ in plans.values() for pid in plan.pids])
     for plan, items in plans.values():
         ports = [item.port for item in items]
@@ -1454,7 +1679,7 @@ def restart_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optiona
     if waiting:
         wait_for_listen(waiting, timeout, besides=besides)
         taken = listening_ports(besides)
-        logs = {item.port: item.restart.log for item in rows if item.restart}
+        logs = {item.port: plan.log for plan, items in plans.values() for item in items}
         for port in waiting:
             late = f"not listening after {int(timeout)}s" + (f", see {tilde(logs[port])}" if port in logs else "")
             results[port] = None if port in taken else late
@@ -1480,6 +1705,11 @@ def restart_summary(item: Listener, rows: List[Listener]) -> str:
                     and row.restart and row.restart.pids[0] == plan.pids[0])
     text = f"{short_command(' '.join(plan.argv))} in {tilde(plan.cwd)}"
     return text + (f" (also {', '.join(map(str, others))})" if others else "")
+
+
+def start_summary(item: Listener) -> str:
+    """What starting a down port runs, for the detail views and the question."""
+    return f"{shown_command(item.start)} in {tilde(item.start.cwd)}" if item.start else ""
 
 
 def show_ports(ports: List[int], rows: List[Listener], paint: Paint) -> int:
@@ -1518,6 +1748,19 @@ def confirm(question: str) -> Optional[bool]:
         return False
 
 
+def refused(verb: str, done: str, count: int, ask) -> Optional[int]:
+    """Ask before acting on count ports: None on yes, else the exit code, 2
+    when there is no one to ask and 1 on a no."""
+    answer = ask(f"  {verb.capitalize()} {plural(count, 'port', 'ports')}? [y/N] ")
+    if answer is None:
+        print(f"  No terminal to ask: add -y to {verb} without asking.\n", file=sys.stderr)
+        return 2
+    if not answer:
+        print(f"  Nothing {done}.\n")
+        return 1
+    return None
+
+
 def kill(rows: List[Listener], ports: List[int], terms: List[str], sure: bool, paint: Paint,
          ask=confirm) -> int:
     """Stop the asked ports at once; a project or stack only after a yes."""
@@ -1529,13 +1772,9 @@ def kill(rows: List[Listener], ports: List[int], terms: List[str], sure: bool, p
     if terms and not sure:
         width = terminal_width()
         print("\n" + "\n".join(render_groups(group_rows(targets), paint, width)) + "\n", flush=True)
-        answer = ask(f"  Stop {plural(len(targets), 'port', 'ports')}? [y/N] ")
-        if answer is None:
-            print("  No terminal to ask: add -y to stop without asking.\n", file=sys.stderr)
-            return 2
-        if not answer:
-            print("  Nothing stopped.\n")
-            return 1
+        code = refused("stop", "stopped", len(targets), ask)
+        if code is not None:
+            return code
     results = stop_many(targets) if targets else {}
     port_w = max([len(str(item.port)) for item in targets] + [0])
     for item in targets:
@@ -1573,13 +1812,9 @@ def restart(rows: List[Listener], ports: List[int], terms: List[str], sure: bool
     print("\n" + "\n".join(plan_lines) + "\n", flush=True)
     doable = [item for item in targets if item.container or item.restart]
     if terms and not sure and doable:
-        answer = ask(f"  Restart {plural(len(doable), 'port', 'ports')}? [y/N] ")
-        if answer is None:
-            print("  No terminal to ask: add -y to restart without asking.\n", file=sys.stderr)
-            return 2
-        if not answer:
-            print("  Nothing restarted.\n")
-            return 1
+        code = refused("restart", "restarted", len(doable), ask)
+        if code is not None:
+            return code
     if doable and sys.stdout.isatty():
         print(paint(DIM, "  restarting, waiting until everything listens again…"), flush=True)
     results = restart_many(doable) if doable else {}
@@ -1593,6 +1828,48 @@ def restart(rows: List[Listener], ports: List[int], terms: List[str], sure: bool
     if lines:
         print("\n".join(lines) + "\n")
     return 1 if any(results.values()) or len(doable) < len(targets) else 0
+
+
+def bring_up(rows: List[Listener], ports: List[int], terms: List[str], sure: bool, paint: Paint,
+             ask=confirm) -> int:
+    """Start the asked ports of wt stacks that are down, the way wt started
+    them; a project or stack only after a yes. What runs is left alone."""
+    targets, free = pick_targets(rows, ports, terms)
+    if terms and not targets:
+        print(f"\n  Nothing found for {' '.join(terms)}.\n")
+        return 1
+    lines = [f"  {paint(BOLD, str(port))} is not a port of a wt stack that is down." for port in free]
+    lines += [f"  {paint(BOLD, str(item.port))} {label(item)} runs already."
+              for item in targets if not item.is_down and item.port in ports]
+    down = [item for item in targets if item.is_down]
+    if terms and not down:
+        lines.append(f"  Nothing is down in {' '.join(terms)}.")
+    port_w = max([len(str(item.port)) for item in down] + [0])
+    if down:
+        print("\n" + "\n".join(start_plan_lines(down, port_w, paint)) + "\n", flush=True)
+    doable = [item for item in down if item.start]
+    if terms and not sure and doable:
+        code = refused("start", "started", len(doable), ask)
+        if code is not None:
+            return code
+    if doable and sys.stdout.isatty():
+        print(paint(DIM, "  starting, waiting until it listens…"), flush=True)
+    results = start_many(doable) if doable else {}
+    for item in doable:
+        name, problem = paint(BOLD, str(item.port).rjust(port_w)), results[item.port]
+        lines.append(f"  {name} {paint(GONE, problem)}" if problem else
+                     f"  {name} {paint(FREE, 'listens')}.  {paint(DIM, label(item))}")
+    print(("" if down else "\n") + "\n".join(lines) + "\n")
+    return 1 if free or any(results.values()) or len(doable) < len(down) else 0
+
+
+def start_plan_lines(down: List[Listener], port_w: int, paint: Paint) -> List[str]:
+    """Per down port what starts it, or why it cannot start."""
+    lines = []
+    for item in down:
+        what = paint(DIM, start_summary(item)) if item.start else paint(GONE, f"not possible: {item.start_problem}")
+        lines.append(f"  {paint(BOLD, str(item.port).rjust(port_w))}  {label(item)}  {what}")
+    return lines
 
 
 def logs_command(item: Listener, lines: int, follow: bool) -> Optional[List[str]]:
@@ -1668,7 +1945,8 @@ def port_number(text: str) -> int:
 def as_json(item: Listener, deep: bool = False) -> dict:
     """One port as plain data; fields that do not apply are null. deep adds
     what only the detail views read: log, parent, connections and restart.
-    A down port has no process, so only its log, which is wt's."""
+    A down port has no process, so only its log, which is wt's, and how it
+    starts again."""
     place, stack, container = item.place, item.stack, item.container
     process = not container and not item.is_down
     data = {
@@ -1697,12 +1975,15 @@ def as_json(item: Listener, deep: bool = False) -> dict:
         "last_lines": item.last_output if item.is_down else None,
     }
     if deep:
-        plan = item.restart
         data.update(log=item.log or None, parent=item.parent or None,
                     connections=None if item.is_down else item.connections,
-                    restart=plan and {"command": plan.argv, "cwd": plan.cwd, "log": plan.log, "env": plan.env},
-                    restart_problem=item.restart_problem or None)
+                    restart=plan_json(item.restart), restart_problem=item.restart_problem or None,
+                    start=plan_json(item.start), start_problem=item.start_problem or None)
     return data
+
+
+def plan_json(plan: Optional[Restart]) -> Optional[dict]:
+    return plan and {"command": plan.argv, "cwd": plan.cwd, "log": plan.log, "env": plan.env}
 
 
 def split_targets(words: List[str]) -> Tuple[List[int], List[str]]:
@@ -1795,12 +2076,14 @@ class Scanner(threading.Thread):
         self.scanned_at = 0.0
         self.error = ""
         self.clock = DownClock()
+        self.seen: Seen = {}  # how each stack port it saw run was started, to start it once it is down
 
     def run(self) -> None:
         while True:
             try:
                 rows = with_down_ports(one_per_port(read_listeners(deep=True)))
                 self.clock.update(rows)
+                add_start_plans(rows, self.seen)
             except Exception as error:  # the view stays up and shows what went wrong
                 with self.lock:
                     self.error = f"scan failed: {error}"
@@ -1948,8 +2231,8 @@ class LiveView:
     """portly live: the grouped list on top, the selected port below, keys at the bottom."""
 
     # The key row: only the keys that do something for the selected row.
-    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("r", "restart"), ("k", "stop"),
-            ("RK", "stack"), ("?", "keys")]
+    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("r", "restart"), ("k", "stop"), ("u", "start"),
+            ("RKU", "stack"), ("?", "keys")]
     # What ? lists: every key.
     ALL_KEYS = [
         ("↑↓ pgup pgdn home end", "select a port; a click selects one, the wheel scrolls"),
@@ -1958,7 +2241,9 @@ class LiveView:
         ("l", "follow its output"),
         ("r", "restart it the way it was started"),
         ("k", "stop it"),
+        ("u", "start a stack's port that is down, the way wt started it"),
         ("R K", "restart or stop every port of its stack or project"),
+        ("U", "start every port of its stack that is down; what runs keeps running"),
         ("/", "filter by project, branch, folder or tool; enter keeps it"),
         ("esc", "clear the filter"),
         ("a", "show apps and helper processes too, or hide them again"),
@@ -2059,25 +2344,30 @@ class LiveView:
         terminal_write(MOUSE_ON)
         self.screen.clear()
 
+    def is_busy(self) -> bool:
+        """Whether a stop, restart or start still runs, and if so, say so: one
+        at a time, as two could act on the same port, and the first to end
+        would hide the other."""
+        with self.busy_lock:
+            if self.busy:
+                self.say("still busy, one stop, restart or start at a time", DIM)
+            return bool(self.busy)
+
     def ask(self, action: str, whole_group: bool) -> None:
         """Put a stop or restart question on the bottom line."""
         item, group = self.current(), self.current_group()
-        if not item or not group:
+        if not item or not group or self.is_busy():
             return
-        with self.busy_lock:
-            if self.busy:  # one at a time: two could act on the same port, and the first to end would hide the other
-                self.say("still busy, one stop or restart at a time", DIM)
-                return
         verb = "Stop" if action == "stop" else "Restart"
         if item.is_down and not whole_group:
-            self.say(f"{item.port} {label(item)} is down: nothing runs to {action}", DIM)
+            hint = "; u starts it" if item.start else ""
+            self.say(f"{item.port} {label(item)} is down: nothing runs to {action}{hint}", DIM)
             return
         if action == "restart" and not whole_group and not (item.container or item.restart):
             self.say(f"{item.port} cannot restart: {item.restart_problem or 'no restart plan'}", DIM)
             return
         if whole_group:
-            branch = branch_text(group.branch, group.is_worktree)
-            name = f"{group.title} {branch}".strip()
+            name = group_name(group)
             running = [row for row in group.rows if not row.is_down]
             if not running:  # a filter can leave only down rows
                 self.say(f"nothing runs in {name} to {action}", DIM)
@@ -2088,14 +2378,42 @@ class LiveView:
             plan = f" with {command}" if command else ""
             self.confirm = (f"{verb} {item.port} {label(item)}{plan}?", [item], action)
 
+    def ask_start(self, whole_group: bool) -> None:
+        """Put a start question on the bottom line: for the selected port when
+        it is down, or for every down port of its stack."""
+        item, group = self.current(), self.current_group()
+        if not item or not group or self.is_busy():
+            return
+        if whole_group:
+            down, name = [row for row in group.rows if row.is_down], group_name(group)
+            doable = [row for row in down if row.start]
+            if not down:
+                self.say(f"nothing is down in {name}", DIM)
+            elif not doable:
+                self.say(f"cannot start {name}: {down[0].start_problem or 'no start plan'}", DIM)
+            else:
+                count = f"{len(doable)} of " if len(doable) < len(down) else ""
+                ports = plural(len(down), "down port", "down ports")
+                self.confirm = (f"Start {count}{ports} of {name}?", doable, "start")
+        elif not item.is_down:
+            self.say(f"{item.port} {label(item)} runs already", DIM)
+        elif not item.start:
+            self.say(f"{item.port} cannot start: {item.start_problem or 'no start plan'}", DIM)
+        else:
+            self.confirm = (f"Start {item.port} {label(item)} with {shown_command(item.start)}?", [item], "start")
+
+    # What each action says while it runs.
+    BUSY = {"stop": "stopping {}", "restart": "restarting {}, waiting until it listens again",
+            "start": "starting {}, waiting until it listens"}
+
     def run_in_background(self, action: str, targets: List[Listener]) -> None:
         names = " ".join(str(item.port) for item in targets)
-        self.busy = f"stopping {names}" if action == "stop" else f"restarting {names}, waiting until it listens again"
+        self.busy = self.BUSY[action].format(names)
         self.message = ""  # the spinner line shows only what is said while it runs
 
         def work() -> None:
             try:
-                results = stop_many(targets) if action == "stop" else restart_many(targets)
+                results = {"stop": stop_many, "restart": restart_many, "start": start_many}[action](targets)
                 problems = [f"{port}: {problem}" for port, problem in results.items() if problem]
                 if problems:
                     outcome = (("still taken, " if action == "stop" else "") + "; ".join(problems), GONE)
@@ -2133,7 +2451,8 @@ class LiveView:
         moves = {"up": -1, "down": 1, "pgup": -10, "pgdn": 10, "home": -10 ** 6, "end": 10 ** 6}
         actions = {"o": self.open_selected, "enter": self.open_selected, "l": self.follow_logs,
                    "c": self.copy_selected, "k": lambda: self.ask("stop", False), "K": lambda: self.ask("stop", True),
-                   "r": lambda: self.ask("restart", False), "R": lambda: self.ask("restart", True)}
+                   "r": lambda: self.ask("restart", False), "R": lambda: self.ask("restart", True),
+                   "u": lambda: self.ask_start(False), "U": lambda: self.ask_start(True)}
         if isinstance(key, tuple):
             self.mouse(key)
         elif key in moves:
@@ -2159,7 +2478,7 @@ class LiveView:
         if key in ("y", "Y"):
             self.run_in_background(action, targets)
         else:
-            self.say("nothing stopped" if action == "stop" else "nothing restarted", DIM)
+            self.say({"stop": "nothing stopped", "restart": "nothing restarted", "start": "nothing started"}[action], DIM)
 
     def edit_filter(self, key) -> bool:
         if key == "enter":
@@ -2231,11 +2550,15 @@ class LiveView:
         group = self.current_group()
         possible = self.possible_keys()
         segments: List[Segment] = [(" ", "")]
-        for key, what in self.KEYS:
-            if key == "RK" and group and not group_stack(group):
+        for keys, what in self.KEYS:
+            if keys == "RKU" and group and not group_stack(group):
                 what = "project"
-            if key in possible:
-                segments += [(key, ACCENT), (f" {what}  ", DIM)]
+            if keys == "RKU":  # the stack keys show as one, with the letters that do something
+                shown = "".join(key for key in keys if key in possible)
+            else:
+                shown = keys if keys in possible else ""
+            if shown:
+                segments += [(shown, ACCENT), (f" {what}  ", DIM)]
         return segments, False
 
     def possible_keys(self) -> Set[str]:
@@ -2243,10 +2566,11 @@ class LiveView:
         item, group = self.current(), self.current_group()
         if not item or not group:
             return {"?"}
+        running = any(not row.is_down for row in group.rows)
         checks = {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log),
                   "r": bool(item.container or item.restart),
-                  "k": not item.is_down and not is_docker_itself(item),
-                  "RK": any(not row.is_down for row in group.rows), "?": True}
+                  "k": not item.is_down and not is_docker_itself(item), "u": bool(item.start),
+                  "R": running, "K": running, "U": any(row.start for row in group.rows), "?": True}
         return {key for key, on in checks.items() if on}
 
     def keys_lines(self) -> List[List[Segment]]:
@@ -2364,6 +2688,7 @@ HELP = """\
   portly kill 3000 8000    stop what listens there
   portly kill wt1          stop everything of a project or stack (asks first)
   portly restart 3000      stop it and start it again the way it was started (also: restart wt1)
+  portly up wt1            start the ports of a wt stack that are down, the way wt started them
   portly open 3000/admin   open http://localhost:3000/admin in your browser (https for symfony)
   portly logs 3000         follow its output: docker logs, or the file it writes to
   portly free 3000         the first free port from 3000 on
@@ -2415,6 +2740,8 @@ def cmd_show(argv: List[str]) -> int:
         parser.error(f"unrecognized arguments: {' '.join(rest)}")
     ports, terms = targets_of(parser, args.targets)
     rows = with_down_ports(one_per_port(read_listeners(deep=bool(ports))))
+    if ports:
+        add_start_plans([item for item in rows if item.port in ports])
     if args.json:
         chosen = [item for item in rows if item.port in ports] if ports else visible(rows, terms, args.all)
         print(json.dumps([as_json(item, deep=bool(ports)) for item in chosen], indent=2, ensure_ascii=False))
@@ -2453,6 +2780,17 @@ def cmd_restart(argv: List[str]) -> int:
     args = parser.parse_args(argv)
     ports, terms = targets_of(parser, args.targets)
     return restart(one_per_port(read_listeners(deep=True)), ports, terms, args.yes, paint_for_stdout())
+
+
+def cmd_up(argv: List[str]) -> int:
+    parser = parser_for("up", "Start the ports of a wt stack that are down, the way wt started them.")
+    parser.add_argument("targets", nargs="+", metavar="port|stack")
+    parser.add_argument("-y", "--yes", action="store_true", help="start a stack's ports without asking")
+    args = parser.parse_args(argv)
+    ports, terms = targets_of(parser, args.targets)
+    rows = with_down_ports(one_per_port(read_listeners()))
+    add_start_plans(pick_targets(rows, ports, terms)[0])
+    return bring_up(rows, ports, terms, args.yes, paint_for_stdout())
 
 
 def cmd_open(argv: List[str]) -> int:
@@ -2569,8 +2907,8 @@ def cmd_live(argv: List[str]) -> int:
     return 0
 
 
-COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_restart, "open": cmd_open,
-            "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
+COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_restart, "up": cmd_up,
+            "open": cmd_open, "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
             # The Dutch names from its days as poort, so scripts and habits keep working.
             "lijst": cmd_show, "herstart": cmd_restart, "vrij": cmd_free, "wacht": cmd_wait}
 
