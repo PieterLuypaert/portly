@@ -1,0 +1,14 @@
+#!/bin/sh
+# Runs dist/portly the way someone who installed it does, from another folder,
+# before CI passes or a release ships it: it must work, and a command that
+# fails must say so with its exit code.
+set -u
+portly=$(cd "$(dirname "$0")/.." && pwd)/dist/portly
+cd "${TMPDIR:-/tmp}"
+"$portly" --help >/dev/null || { echo "portly --help failed"; exit 1; }
+"$portly" list >/dev/null || { echo "portly list failed"; exit 1; }
+"$portly" --json >/dev/null || { echo "portly --json failed"; exit 1; }
+"$portly" wait 1 -t 0.2
+code=$?
+[ "$code" -eq 1 ] || { echo "portly wait on a port nothing listens on exited $code, not 1"; exit 1; }
+echo "one-file portly works"
