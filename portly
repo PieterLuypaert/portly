@@ -269,6 +269,18 @@ class Lookup:
         return home, None
 
 
+def read_cwds(pids: Set[int]) -> Dict[int, str]:
+    """The working folder of each of pids that still runs."""
+    cwds, pid = {}, 0
+    listed = ",".join(sorted(map(str, pids)))
+    for line in (run(["lsof", "-a", "-p", listed, "-d", "cwd", "-Fpn"]) if listed else "").splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n"):
+            cwds[pid] = line[1:]
+    return cwds
+
+
 def add_process_info(listeners: List[Listener], lookup: Lookup) -> None:
     """Fill in parent, age, command line, working folder and place."""
     pids = ",".join(sorted({str(item.pid) for item in listeners}))
@@ -277,12 +289,7 @@ def add_process_info(listeners: List[Listener], lookup: Lookup) -> None:
         parts = line.split(None, 6)
         if len(parts) == 7:
             info[int(parts[0])] = parts[1:]
-    cwds, pid = {}, 0
-    for line in run(["lsof", "-a", "-p", pids, "-d", "cwd", "-Fpn"]).splitlines():
-        if line.startswith("p"):
-            pid = int(line[1:])
-        elif line.startswith("n"):
-            cwds[pid] = line[1:]
+    cwds = read_cwds({item.pid for item in listeners})
     for item in listeners:
         if item.pid in info:
             ppid, item.elapsed, item.tty, rss, item.cpu, item.args = info[item.pid]
@@ -478,13 +485,7 @@ def add_restart_plans(listeners: List[Listener]) -> None:
     procs = read_processes()
     processes = [item for item in listeners if not item.container]
     launchers = {item.pid: launcher_of(item.pid, procs) for item in processes}
-    others = ",".join(sorted({str(pid) for pid in launchers.values() if pid not in launchers}))
-    cwds, pid = {}, 0
-    for line in (run(["lsof", "-a", "-p", others, "-d", "cwd", "-Fpn"]) if others else "").splitlines():
-        if line.startswith("p"):
-            pid = int(line[1:])
-        elif line.startswith("n"):
-            cwds[pid] = line[1:]
+    cwds = read_cwds({pid for pid in launchers.values() if pid not in launchers})
     for item in processes:
         item.restart, item.restart_problem = plan_restart(item, procs, cwds)
 
