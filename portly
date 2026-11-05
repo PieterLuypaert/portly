@@ -9,7 +9,9 @@
   portly kill 3000     stop what listens on it: the process, or its container
   portly kill wt1      stop everything of a project or stack, after asking
   portly restart 3000  stop it and start it again the way it was started
-  portly up wt1        start the ports of a stack that are down, the way wt started them
+  portly up wt1        start the ports of a stack that are down, the way wt started them,
+                       or an idle worktree's stack with wt up
+  portly forget shop   stop showing shop's idle worktrees, until something runs in it
   portly open 3000     open http://localhost:3000 in the browser (https for symfony)
   portly logs 3000     follow its output: docker logs, or the file it writes to
   portly free 3000     the first free port from 3000 on
@@ -25,7 +27,9 @@ project, except a stack that wt started (compose project <name>-wt<n>): that
 belongs to its worktree, found in wt's registry, .git/<name>-worktrees/<n>.env.
 A port of such a stack that nothing listens on shows as down, with wt's log,
 and starts again with what wt_cfg_dev_cmd in the repo's wt.config gives for
-it, or with what portly live saw run on it.
+it, or with what portly live saw run on it. A worktree of a repo portly saw
+something run in shows as idle while nothing runs in it; its stack starts
+with wt up. The repos it saw are kept in ~/.cache/portly/repos.
 Colour is dropped with NO_COLOR or when the output is not a terminal.
 """
 import argparse
@@ -40,15 +44,18 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, replace
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 HOME = os.path.expanduser("~")
+# portly's own files: the output of what it starts, and the repos it saw.
+CACHE = os.path.join(HOME, ".cache", "portly")
 
 # Executables that run a script: the script names the process, not the binary.
 # macOS runs python3 as .../Python.app/Contents/MacOS/Python.
@@ -132,6 +139,8 @@ class Listener:
     cpu: str = ""
     others: List["Listener"] = field(default_factory=list)  # other servers on this port, beside this row
     is_down: bool = False  # a wt stack's port that nothing listens on: no process, pid 0
+    is_idle: bool = False  # a worktree of a known repo where nothing runs: no port (0), no process
+    idle_since: float = 0.0  # an idle worktree: when its stack last wrote to wt's logs; 0 when unknown
     last_output: List[str] = field(default_factory=list)  # a down port's last lines in wt's log
     down_since: float = 0.0  # when the live view saw a down port go down; 0 when it does not know
     # Only read for the detail views (deep=True):
@@ -187,6 +196,12 @@ def main_checkout(common: str) -> str:
     return os.path.dirname(common) if os.path.basename(common) == ".git" else common
 
 
+def repo_name(common: str) -> str:
+    """A repo's name: the folder of its main checkout, without .git."""
+    name = os.path.basename(main_checkout(common))
+    return name[:-4] if name.endswith(".git") else name
+
+
 def place_of(cwd: str) -> Optional[Place]:
     if not cwd or cwd == "/":
         return None
@@ -199,9 +214,8 @@ def place_of(cwd: str) -> Optional[Place]:
     top, common, branch = os.path.realpath(out[0]), os.path.realpath(out[1]), out[2]
     main = main_checkout(common)
     sub = os.path.relpath(os.path.realpath(cwd), top)
-    repo = os.path.basename(main)
     return Place(
-        repo=repo[:-4] if repo.endswith(".git") else repo,
+        repo=repo_name(common),
         sub="" if sub == "." else sub,
         branch=branch,
         is_worktree=top != main,
@@ -438,7 +452,7 @@ def restart_argv(args: str, cwd: str) -> Optional[List[str]]:
 
 def default_log(item: Listener) -> str:
     name = item.place.repo if item.place else re.sub(r"\W+", "-", label(item))
-    return os.path.join(HOME, ".cache", "portly", f"{name}-{item.port}.log")
+    return os.path.join(CACHE, f"{name}-{item.port}.log")
 
 
 def wt_env(stack: Stack, place: Place) -> Dict[str, str]:
@@ -674,6 +688,75 @@ def add_start_plans(rows: List[Listener], seen: Optional[Seen] = None) -> None:
             item.start, item.start_problem = plan_start(item, seen)
 
 
+# wt ships in a repo, or with Claude Code's worktree-local-env skill.
+WT_SHIPPED = os.path.join(".claude", "skills", "worktree-local-env", "scripts", "wt")
+WT_IN_PLUGINS = [os.path.join(HOME, ".claude", "plugins", *["*"] * depth, "skills", "worktree-local-env", "scripts", "wt")
+                 for depth in (3, 4)]
+
+
+# The wt found per main checkout, kept while it is there.
+WT_FOUND: Dict[str, str] = {}
+
+
+def find_wt(main: str) -> str:
+    """The wt to run for a repo: the one it ships, else wt on PATH, else the
+    newest one in Claude Code's plugins; "" when there is none."""
+    if not os.access(WT_FOUND.get(main, ""), os.X_OK):
+        WT_FOUND[main] = look_for_wt(main)
+    return WT_FOUND[main]
+
+
+def look_for_wt(main: str) -> str:
+    shipped = os.path.join(main, WT_SHIPPED)
+    if os.access(shipped, os.X_OK):
+        return shipped
+    if shutil.which("wt"):
+        return shutil.which("wt")
+    found = [path for pattern in WT_IN_PLUGINS for path in glob.glob(pattern) if os.access(path, os.X_OK)]
+    return max(found, key=os.path.getmtime, default="")
+
+
+def plan_wt_up(item: Listener, wt: str) -> Tuple[Optional[Restart], str]:
+    """How to start an idle worktree's stack with the wt found for its repo:
+    wt up <branch> in the main checkout, as you would; or why portly cannot."""
+    if not item.stack:
+        return None, "portly does not know how to start it: it has no wt stack"
+    if item.place.branch == "HEAD":
+        return None, "its HEAD is detached, and wt up needs a branch"
+    main = main_checkout(item.place.common)
+    if not wt:
+        return None, "cannot find wt: not in the repo, on PATH or in Claude Code's plugins"
+    log = os.path.join(CACHE, f"{item.place.repo}-wt{item.stack.index}.log")
+    return Restart([wt, "up", item.place.branch], main, [], log, kind="start"), ""
+
+
+# wt up may build before it starts anything.
+WT_UP_SECONDS = 600
+
+
+def start_idle(item: Listener, timeout: float = 120) -> Optional[str]:
+    """Run an idle worktree's wt up, then wait until the ports wt started a
+    server for listen; None then, else the reason."""
+    plan, stack = item.start, item.stack
+    # Its own session, as start's: leaving portly does not stop a wt up halfway.
+    with open_log(plan) as log:
+        try:
+            done = subprocess.run(plan.argv, cwd=plan.cwd, env=plan_env(plan), stdin=subprocess.DEVNULL, stdout=log,
+                                  stderr=subprocess.STDOUT, timeout=WT_UP_SECONDS, start_new_session=True)
+        except subprocess.TimeoutExpired:
+            return f"wt up did not finish within {WT_UP_SECONDS}s, see {tilde(plan.log)}"
+        except OSError as error:
+            return f"cannot run wt: {error.strerror}"
+    if done.returncode:
+        return f"{(last_lines(plan.log, 1) or ['wt up failed'])[-1]} (see {tilde(plan.log)})"
+    ports = [port for role, port in stack.ports.items() if os.path.isfile(stack.pid_file(role))]
+    if not ports:
+        return f"wt up started no server, see {tilde(plan.log)}"
+    if wait_for_listen(ports, timeout)[0]:
+        return None
+    return f"not listening after {int(timeout)}s, see wt's logs in {tilde(os.path.join(stack.registry, 'logs'))}"
+
+
 def shown_command(plan: Restart) -> str:
     """A plan's command as you would type it: wt's for a start, else without paths."""
     if plan.argv[:2] == ["bash", "-c"] and len(plan.argv) == 3:
@@ -802,10 +885,15 @@ def down_ports(rows: List[Listener]) -> List[Listener]:
             if port in taken or not os.path.isfile(stack.pid_file(role)):
                 continue
             taken.add(port)  # two stacks on the same ports: rows are told apart by port
-            log = stack.log_file(role) if os.path.isfile(stack.log_file(role)) else ""
-            down.append(Listener(port, 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
-                                 is_down=True, log=log, last_output=last_lines(log, 10) if log else []))
+            down.append(down_row(stack, role, place))
     return down
+
+
+def down_row(stack: Stack, role: str, place: Place) -> Listener:
+    """The row of a stack's port that nothing listens on, with wt's log for its role."""
+    log = stack.log_file(role) if os.path.isfile(stack.log_file(role)) else ""
+    return Listener(stack.ports[role], 0, role, cwd=place.top, place=replace(place, sub=""), stack=stack,
+                    is_down=True, log=log, last_output=last_lines(log, 10) if log else [])
 
 
 def with_down_ports(rows: List[Listener]) -> List[Listener]:
@@ -815,6 +903,139 @@ def with_down_ports(rows: List[Listener]) -> List[Listener]:
     rows = sorted(rows + down_ports(rows), key=lambda item: item.port)
     count_up(rows)
     return rows
+
+
+def known_repos_file() -> str:
+    """The repos portly saw something run in, so their worktrees show when
+    nothing runs: one git common dir per line."""
+    return os.path.join(CACHE, "repos")
+
+
+def read_known_repos() -> List[str]:
+    try:
+        with open(known_repos_file(), encoding="utf-8", errors="replace") as text:
+            return [line.strip() for line in text if line.strip()]
+    except OSError:
+        return []  # none known yet
+
+
+def write_known_repos(commons: List[str]) -> None:
+    try:
+        os.makedirs(CACHE, exist_ok=True)
+        handle, path = tempfile.mkstemp(dir=CACHE, prefix="repos.")  # one each: two portly's can write at once
+        with os.fdopen(handle, "w") as text:
+            text.write("".join(f"{common}\n" for common in commons))
+        os.replace(path, known_repos_file())
+    except OSError as error:
+        raise OSError(error.errno, f"cannot keep the repos it knows in {tilde(known_repos_file())}: "
+                                   f"{error.strerror}") from error
+
+
+def remember_repos(rows: List[Listener]) -> List[str]:
+    """The git common dirs of the repos portly knows: those of rows, and
+    those it saw before that still exist. Written back when that changed."""
+    known = read_known_repos()
+    seen = {item.place.common for item in rows if item.place and item.place.common}
+    kept = sorted(common for common in set(known) | seen if os.path.isdir(common))
+    if kept != known:
+        write_known_repos(kept)
+    return kept
+
+
+# git worktree list per repo, by what changes when a worktree comes, goes or
+# switches branch: the live view asks every scan.
+WORKTREES: Dict[str, Tuple[tuple, str]] = {}
+
+
+def worktree_list(common: str) -> str:
+    try:
+        entries = [os.path.join(entry.path, name) for entry in os.scandir(os.path.join(common, "worktrees"))
+                   for name in ("HEAD", "gitdir")]
+        stamp = tuple(sorted((path, os.stat(path).st_mtime_ns) for path in entries if os.path.exists(path)))
+    except OSError:
+        stamp = ()  # no linked worktree yet
+    if WORKTREES.get(common, ((None,), ""))[0] != stamp:
+        WORKTREES[common] = stamp, run(["git", "-C", main_checkout(common), "worktree", "list", "--porcelain"])
+    return WORKTREES[common][1]
+
+
+def worktrees(common: str) -> List[Tuple[str, str]]:
+    """Each linked worktree of a repo whose folder exists, with its branch
+    (HEAD when detached), from git worktree list; not the main checkout."""
+    found, path, branch = [], "", ""
+    for line in worktree_list(common).splitlines() + [""]:
+        if line.startswith("worktree "):
+            path, branch = line[len("worktree "):], ""
+        elif line.startswith("branch "):
+            branch = line[len("branch "):].replace("refs/heads/", "", 1)
+        elif line == "detached":
+            branch = "HEAD"
+        elif not line and path:
+            found.append((os.path.realpath(path), branch))
+            path = ""
+    return [(path, branch) for path, branch in found[1:] if os.path.isdir(path)]
+
+
+def last_ran(stack: Optional[Stack]) -> float:
+    """When a stack's servers last wrote to wt's logs; 0 when there is no log."""
+    times = []
+    for path in glob.glob(os.path.join(stack.registry, "logs", f"{stack.index}-*.log")) if stack else []:
+        try:
+            times.append(os.path.getmtime(path))
+        except OSError:
+            continue  # removed since the glob
+    return max(times, default=0.0)
+
+
+def stopped_worktrees(rows: List[Listener], commons: List[str]) -> List[Listener]:
+    """Rows for the worktrees of the repos in commons where nothing
+    listens: a down row per port wt started a server for, such as a stack
+    whose servers all crashed, else one idle row. A worktree that a row of
+    rows belongs to is left out, and so is one whose stack has a port that
+    listens, such as a container that went to another checkout's group."""
+    busy = {item.place.top for item in rows if item.place}
+    taken = {item.port for item in rows if not item.is_idle}  # a port gets one row, as in down_ports
+    listening = {item.port for item in rows if runs(item)}
+    found = []
+    for common in commons:
+        stacks = {os.path.realpath(stack.path): stack for stack in read_stacks(common)}
+        wt: Optional[str] = None  # looked up once per repo, when it has an idle worktree
+        for top, branch in worktrees(common):
+            stack = stacks.get(top)
+            if top in busy or (stack and listening & set(stack.ports.values())):
+                continue
+            place = Place(repo_name(common), "", branch, True, top, common)
+            down = [down_row(stack, role, place) for role, port in stack.ports.items()
+                    if port not in taken and os.path.isfile(stack.pid_file(role))] if stack else []
+            taken.update(item.port for item in down)
+            if not down and wt is None:
+                wt = find_wt(main_checkout(common))
+            found += down or [idle_row(place, stack, wt or "")]
+    return found
+
+
+def idle_row(place: Place, stack: Optional[Stack], wt: str) -> Listener:
+    item = Listener(0, 0, "idle", cwd=place.top, place=place, stack=stack, is_idle=True, idle_since=last_ran(stack))
+    item.start, item.start_problem = plan_wt_up(item, wt)
+    return item
+
+
+def warn(text: str) -> None:
+    print(f"portly: {text}", file=sys.stderr)
+
+
+def with_idle_worktrees(rows: List[Listener], problem: Callable[[str], None] = warn) -> List[Listener]:
+    """rows and the worktrees of the repos portly knows where nothing runs,
+    each stack among them with its count of what is up. When the repos it
+    knows cannot be kept, problem hears why and this scan's still show."""
+    try:
+        commons = remember_repos(rows)
+    except OSError as error:
+        problem(error.strerror)
+        commons = sorted({item.place.common for item in rows if item.place and item.place.common})
+    stopped = stopped_worktrees(rows, commons)
+    count_up(stopped)
+    return rows + stopped
 
 
 def count_up(rows: List[Listener]) -> None:
@@ -831,11 +1052,31 @@ def count_up(rows: List[Listener]) -> None:
         stack.up, stack.of = sum(1 for item in items if not item.is_down), len(items)
 
 
+def runs(item: Listener) -> bool:
+    """Whether a process or container serves a row: not a down port, nor an idle worktree."""
+    return not item.is_down and not item.is_idle
+
+
+# What tells rows apart: a port, or an idle worktree's folder.
+RowKey = Union[int, str]
+
+
+def row_key(item: Listener) -> RowKey:
+    return item.cwd if item.is_idle else item.port
+
+
+def name_of(item: Listener) -> str:
+    """A row as a message names it: its port, or an idle worktree's stack or branch."""
+    if not item.is_idle:
+        return str(item.port)
+    return f"wt{item.stack.index}" if item.stack else item.place.branch
+
+
 def drop_helpers(rows: List[Listener]) -> List[Listener]:
     """Drop a process whose parent listens too, such as php-fpm under the
     symfony server: its port is internal. A down row's pid 0 is nobody's
     parent, also not of a process whose ppid is 0, such as launchd."""
-    pids = {item.pid for item in rows if not item.is_down}
+    pids = {item.pid for item in rows if runs(item)}
     return [item for item in rows if item.ppid not in pids]
 
 
@@ -1101,10 +1342,12 @@ def tool_of(item: Listener) -> str:
 
 
 # The status column: one glyph per row. Its shape keeps the meaning without colour.
-RUNNING, DOWN = "●", "✗"
+RUNNING, DOWN, IDLE = "●", "✗", "○"
 
 
 def status_of(item: Listener) -> Tuple[str, str]:
+    if item.is_idle:
+        return IDLE, DIM
     return (DOWN, GONE) if item.is_down else (RUNNING, FREE)
 
 
@@ -1128,14 +1371,16 @@ def group_stack(group: Group) -> str:
     return next((word for word in map(stack_word, group.rows) if word), "") if group.branch else ""
 
 
-def header_segments(group: Group, width: int) -> List[Segment]:
+def header_segments(group: Group, width: int, with_path: bool = True) -> List[Segment]:
     """repo · branch · wt1 and how many of the stack's ports are up, or repo
     · branch · worktree for a worktree wt did not make, then the path, dim,
     while it fits. A part that does not fit is left out, with what follows it."""
-    tone = GONE if group.title == ORPHANS else DIM if group.title == OTHERS else ACCENT
+    idle = is_idle_group(group)
+    tone = GONE if group.title == ORPHANS else DIM if group.title == OTHERS or idle else ACCENT
     wt = group_stack(group)
     kind = wt or ("worktree" if group.is_worktree else "")
-    parts = [(group.title, tone), (group.branch, WORKTREE if group.is_worktree else ""), (kind, WORKTREE)]
+    branch_tone = DIM if idle else WORKTREE if group.is_worktree else ""
+    parts = [(group.title, tone), (group.branch, branch_tone), (kind, DIM if idle else WORKTREE)]
     segments: List[Segment] = [("  ", "")]
     room = width - 2
     for text, part_tone in (part for part in parts if part[0]):
@@ -1151,7 +1396,7 @@ def header_segments(group: Group, width: int) -> List[Segment]:
     if stack and stack.of and segments[-1] == (wt, WORKTREE) and room - 2 >= len(up_text(stack)):
         segments += [("  ", ""), (up_text(stack), FREE if stack.up == stack.of else WORKTREE)]
         room -= 2 + len(up_text(stack))
-    if group.path and room - 2 >= min(len(group.path), 4):
+    if with_path and group.path and room - 2 >= min(len(group.path), 4):
         segments += [("  ", ""), (clip(group.path, room - 2), DIM)]
     return segments
 
@@ -1200,19 +1445,51 @@ class Columns:
 def group_lines(groups: List[Group], width: int) -> List[Line]:
     """Every line of the grouped list: a header per group, a row per port and
     a blank line between groups. Columns line up across groups."""
-    rows = [item for group in groups for item in group.rows]
-    if not rows:
-        return []
-    ages = {id(item): age_of(item) for item in rows}
-    columns = Columns(max(len(str(item.port)) for item in rows), max(map(len, ages.values())), ages)
-    row_segments = (full_rows if width >= FULL_ROW else narrow_rows)(rows, width, columns)
+    rows = [item for group in groups for item in group.rows if not item.is_idle]
+    row_segments = {}
+    if rows:
+        ages = {id(item): age_of(item) for item in rows}
+        columns = Columns(max(len(str(item.port)) for item in rows), max(map(len, ages.values())), ages)
+        row_segments = (full_rows if width >= FULL_ROW else narrow_rows)(rows, width, columns)
     lines: List[Line] = []
+    after_idle = False
     for group in groups:
-        if lines:
+        idle = is_idle_group(group)
+        if lines and not (idle and after_idle):  # idle worktrees follow each other without a gap
             lines.append((None, None, []))
-        lines.append((None, group, header_segments(group, width)))
-        lines += [(item, group, row_segments[id(item)]) for item in group.rows]
+        if idle:
+            lines.append((group.rows[0], group, idle_line(group, width)))
+        else:
+            lines.append((None, group, header_segments(group, width)))
+            lines += [(item, group, row_segments[id(item)]) for item in group.rows]
+        after_idle = idle
     return lines
+
+
+def is_idle_group(group: Group) -> bool:
+    return bool(group.rows) and all(item.is_idle for item in group.rows)
+
+
+def idle_line(group: Group, width: int) -> List[Segment]:
+    """An idle worktree in one dim line: its header without the path, then
+    ○ idle · ports 20130-20133 · last ran 2d ago, while that fits."""
+    item = group.rows[0]
+    parts = ["idle"]
+    if item.stack and item.stack.ports:
+        parts.append("ports " + port_span(item.stack.ports.values()))
+    if item.idle_since:
+        parts.append(f"last ran {short_duration(int(time.time() - item.idle_since))} ago")
+    segments = header_segments(group, width - 8, with_path=False)  # room left for ○ idle
+    room = width - sum(cells(text) for text, _ in segments) - 4
+    return segments + [("  ", ""), (IDLE, DIM), (" ", ""), (clip(" · ".join(parts), room), DIM)]
+
+
+def port_span(ports) -> str:
+    """20130-20133 for ports in a row, else 20130, 20135."""
+    ordered = sorted(set(ports))
+    if len(ordered) > 2 and ordered[-1] - ordered[0] == len(ordered) - 1:
+        return f"{ordered[0]}-{ordered[-1]}"
+    return ", ".join(map(str, ordered))
 
 
 def port_segments(item: Listener, columns: Columns) -> List[Segment]:
@@ -1318,7 +1595,7 @@ LOOPBACK = re.compile(r"127\.[\d.]+|\[::1\]|localhost")
 
 
 def url_of(item: Listener) -> str:
-    if item.is_down:
+    if not runs(item):
         return ""
     inner = item.container.inner.get(item.port) if item.container else None
     if item.port in NOT_HTTP or inner in NOT_HTTP:
@@ -1336,6 +1613,8 @@ def output_of(item: Listener) -> str:
     """Where a process's output goes."""
     if item.log:
         return tilde(item.log)
+    if item.is_idle:
+        return "nothing runs"
     if item.is_down:
         return "no log from wt"
     if has_terminal(item.tty):
@@ -1355,6 +1634,8 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
         add("project", f"{item.place.repo} · {branch_text(item.place.branch, item.place.is_worktree)}")
     if item.stack:
         add("stack", f"wt {item.stack.index} of {item.stack.name}", note=item.stack.role_of(item.port))
+    if item.is_idle:
+        return fields + idle_fields(item)
     if item.is_down:
         since = f" · since {started_at(int(time.time() - item.down_since))}" if item.down_since else ""
         add("state", "down", GONE, "nothing listens on it" + since)
@@ -1406,7 +1687,23 @@ def detail_fields(item: Listener, rows: Optional[List[Listener]] = None) -> List
     return fields
 
 
+def idle_fields(item: Listener) -> List[Tuple[str, str, str, str]]:
+    """What the details of an idle worktree add after its project and stack."""
+    ran = f" · last ran {started_at(int(time.time() - item.idle_since))}" if item.idle_since else ""
+    fields = [("state", "idle", DIM, "nothing runs in this worktree" + ran), ("folder", tilde(item.cwd), "", "")]
+    if item.stack:
+        ports = sorted(item.stack.ports.items(), key=lambda pair: pair[1])
+        fields.append(("ports", " · ".join(f"{port} {role}" for role, port in ports), "", ""))
+    if item.start:
+        fields.append(("start", start_summary(item), "", ""))
+    else:
+        fields.append(("start", "not possible", DIM, item.start_problem))
+    return fields
+
+
 def hints_for(item: Listener) -> List[str]:
+    if item.is_idle:
+        return [f"portly up {name_of(item)}"] if item.start and item.stack else []
     if item.is_down:
         return ([f"portly up {item.port}"] if item.start else []) + ([f"portly logs {item.port}"] if item.log else [])
     hints = []
@@ -1601,17 +1898,28 @@ def stop_tree(pids: List[int], ports: List[int], besides: Optional[Dict[int, Set
     return "the port stayed taken" if wait_for_ports(ports, 2, besides) else None
 
 
+def open_log(plan: Restart):
+    """The plan's log, opened to append, after a line that says what portly runs and when."""
+    os.makedirs(os.path.dirname(plan.log), exist_ok=True)
+    log = open(plan.log, "a")
+    log.write(f"\n── portly {plan.kind} {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
+    log.flush()
+    return log
+
+
+def plan_env(plan: Restart) -> Dict[str, str]:
+    """portly's environment with the plan's variables. wt's variables in
+    portly's own shell belong to the worktree portly runs in, not to this one."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("WT_")}
+    env.update(plan.env)
+    return env
+
+
 def start(plan: Restart) -> int:
     """Run the plan's command in its folder, detached, its output appended to
     the plan's log. The new pid goes into wt's pid file when there is one."""
-    os.makedirs(os.path.dirname(plan.log), exist_ok=True)
-    with open(plan.log, "a") as log:
-        log.write(f"\n── portly {plan.kind} {datetime.now():%Y-%m-%d %H:%M:%S}: {' '.join(plan.argv)} ──\n")
-        log.flush()
-        # wt's variables in portly's own shell belong to the worktree portly runs in, not to this server.
-        env = {key: value for key, value in os.environ.items() if not key.startswith("WT_")}
-        env.update(plan.env)
-        process = subprocess.Popen(plan.argv, cwd=plan.cwd, env=env, stdin=subprocess.DEVNULL, stdout=log,
+    with open_log(plan) as log:
+        process = subprocess.Popen(plan.argv, cwd=plan.cwd, env=plan_env(plan), stdin=subprocess.DEVNULL, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True)
     if plan.pidfile:
         with open(plan.pidfile, "w") as pidfile:
@@ -1627,9 +1935,13 @@ def restart_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optiona
     return run_plans(rows, lambda item: (item.restart, item.restart_problem or "no restart plan"), timeout)
 
 
-def start_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optional[str]]:
+def start_many(rows: List[Listener], timeout: float = 60) -> Dict[RowKey, Optional[str]]:
     """Start down ports of wt stacks by their start plans, after stopping what
-    still runs of their old server. Per port None once it listens, else the reason."""
+    still runs of their old server, and idle worktrees' stacks through wt.
+    Per row (row_key) None once it listens, else the reason."""
+    results: Dict[RowKey, Optional[str]] = {
+        row_key(item): start_idle(item, timeout) if item.start else item.start_problem or "no start plan"
+        for item in rows if item.is_idle}
     procs = read_processes()
 
     def plan_of(item: Listener) -> Tuple[Optional[Restart], str]:
@@ -1638,7 +1950,8 @@ def start_many(rows: List[Listener], timeout: float = 60) -> Dict[int, Optional[
         pids, wait = old_server(item.stack, item.stack.role_of(item.port), procs)
         return (None, wait) if wait else (replace(item.start, pids=pids), "")
 
-    return run_plans(rows, plan_of, timeout)
+    down = [item for item in rows if not item.is_idle]
+    return {**results, **(run_plans(down, plan_of, timeout) if down else {})}
 
 
 def run_plans(rows: List[Listener], plan_of: Callable[[Listener], Tuple[Optional[Restart], str]],
@@ -1728,14 +2041,17 @@ def show_ports(ports: List[int], rows: List[Listener], paint: Paint) -> int:
 
 
 def pick_targets(rows: List[Listener], ports: List[int], terms: List[str]) -> Tuple[List[Listener], List[int]]:
-    """What to stop, by port, and the asked ports that are already free. A
-    word picks every dev server it matches; helpers stop with their parent."""
-    by_port = {item.port: item for item in rows}
+    """What to act on, by port, then idle worktrees, and the asked ports
+    that are already free. A word picks every dev server it matches; helpers
+    stop with their parent. Rows are told apart by row_key: every idle
+    worktree has port 0."""
+    by_port = {item.port: item for item in rows if not item.is_idle}
     chosen = {port: by_port[port] for port in ports if port in by_port}
     if terms:
         for item in visible(rows, terms, show_all=False):
-            chosen.setdefault(item.port, item)
-    return [chosen[port] for port in sorted(chosen)], [port for port in ports if port not in by_port]
+            chosen.setdefault(row_key(item), item)
+    order = sorted(chosen.values(), key=lambda item: (item.is_idle, item.port, item.cwd))
+    return order, [port for port in ports if port not in by_port]
 
 
 def confirm(question: str) -> Optional[bool]:
@@ -1748,10 +2064,10 @@ def confirm(question: str) -> Optional[bool]:
         return False
 
 
-def refused(verb: str, done: str, count: int, ask) -> Optional[int]:
+def refused(verb: str, done: str, count: int, ask, noun: Tuple[str, str] = ("port", "ports")) -> Optional[int]:
     """Ask before acting on count ports: None on yes, else the exit code, 2
     when there is no one to ask and 1 on a no."""
-    answer = ask(f"  {verb.capitalize()} {plural(count, 'port', 'ports')}? [y/N] ")
+    answer = ask(f"  {verb.capitalize()} {plural(count, *noun)}? [y/N] ")
     if answer is None:
         print(f"  No terminal to ask: add -y to {verb} without asking.\n", file=sys.stderr)
         return 2
@@ -1833,42 +2149,45 @@ def restart(rows: List[Listener], ports: List[int], terms: List[str], sure: bool
 def bring_up(rows: List[Listener], ports: List[int], terms: List[str], sure: bool, paint: Paint,
              ask=confirm) -> int:
     """Start the asked ports of wt stacks that are down, the way wt started
-    them; a project or stack only after a yes. What runs is left alone."""
+    them, and an idle worktree's stack when its word (wt3) is asked; a
+    project or stack only after a yes. What runs is left alone."""
     targets, free = pick_targets(rows, ports, terms)
     if terms and not targets:
         print(f"\n  Nothing found for {' '.join(terms)}.\n")
         return 1
     lines = [f"  {paint(BOLD, str(port))} is not a port of a wt stack that is down." for port in free]
     lines += [f"  {paint(BOLD, str(item.port))} {label(item)} runs already."
-              for item in targets if not item.is_down and item.port in ports]
-    down = [item for item in targets if item.is_down]
+              for item in targets if runs(item) and item.port in ports]
+    words = {term.lower() for term in terms}
+    down = [item for item in targets if item.is_down or (item.is_idle and stack_word(item) in words)]
     if terms and not down:
         lines.append(f"  Nothing is down in {' '.join(terms)}.")
-    port_w = max([len(str(item.port)) for item in down] + [0])
+    name_w = max([len(name_of(item)) for item in down] + [0])
     if down:
-        print("\n" + "\n".join(start_plan_lines(down, port_w, paint)) + "\n", flush=True)
+        print("\n" + "\n".join(start_plan_lines(down, name_w, paint)) + "\n", flush=True)
     doable = [item for item in down if item.start]
     if terms and not sure and doable:
-        code = refused("start", "started", len(doable), ask)
+        noun = ("port", "ports") if any(item.is_down for item in doable) else ("stack", "stacks")
+        code = refused("start", "started", len(doable), ask, noun)
         if code is not None:
             return code
     if doable and sys.stdout.isatty():
         print(paint(DIM, "  starting, waiting until it listens…"), flush=True)
     results = start_many(doable) if doable else {}
     for item in doable:
-        name, problem = paint(BOLD, str(item.port).rjust(port_w)), results[item.port]
+        name, problem = paint(BOLD, name_of(item).rjust(name_w)), results[row_key(item)]
         lines.append(f"  {name} {paint(GONE, problem)}" if problem else
-                     f"  {name} {paint(FREE, 'listens')}.  {paint(DIM, label(item))}")
+                     f"  {name} {paint(FREE, 'is up' if item.is_idle else 'listens')}.  {paint(DIM, label(item))}")
     print(("" if down else "\n") + "\n".join(lines) + "\n")
     return 1 if free or any(results.values()) or len(doable) < len(down) else 0
 
 
-def start_plan_lines(down: List[Listener], port_w: int, paint: Paint) -> List[str]:
-    """Per down port what starts it, or why it cannot start."""
+def start_plan_lines(down: List[Listener], name_w: int, paint: Paint) -> List[str]:
+    """Per down port or idle stack what starts it, or why it cannot start."""
     lines = []
     for item in down:
         what = paint(DIM, start_summary(item)) if item.start else paint(GONE, f"not possible: {item.start_problem}")
-        lines.append(f"  {paint(BOLD, str(item.port).rjust(port_w))}  {label(item)}  {what}")
+        lines.append(f"  {paint(BOLD, name_of(item).rjust(name_w))}  {label(item)}  {what}")
     return lines
 
 
@@ -1948,11 +2267,12 @@ def as_json(item: Listener, deep: bool = False) -> dict:
     A down port has no process, so only its log, which is wt's, and how it
     starts again."""
     place, stack, container = item.place, item.stack, item.container
-    process = not container and not item.is_down
+    process = not container and runs(item)
     data = {
-        "port": item.port,
+        "port": None if item.is_idle else item.port,
         "name": label(item),
         "down": item.is_down,
+        "idle": item.is_idle,
         "url": url_of(item) or None,
         "addresses": item.addresses,
         "local_only": is_local_only(item),
@@ -1960,7 +2280,7 @@ def as_json(item: Listener, deep: bool = False) -> dict:
                               "path": place.top, "folder": place.sub},
         "stack": stack and {"name": stack.name, "index": stack.index,
                             "role": stack.role_of(item.port) or None,
-                            "up": stack.up if stack.of else None, "of": stack.of or None},
+                            "up": stack.up if stack.of else None, "of": stack.of or None, "ports": stack.ports},
         "container": container and {"name": container.name, "image": container.image,
                                     "status": container.status, "compose_project": container.project or None,
                                     "service": container.service or None,
@@ -1973,10 +2293,11 @@ def as_json(item: Listener, deep: bool = False) -> dict:
         "memory_kb": item.rss_kb if process else None,
         "others": [as_json(other, deep) for other in item.others],
         "last_lines": item.last_output if item.is_down else None,
+        "last_ran_seconds": int(time.time() - item.idle_since) if item.is_idle and item.idle_since else None,
     }
     if deep:
         data.update(log=item.log or None, parent=item.parent or None,
-                    connections=None if item.is_down else item.connections,
+                    connections=item.connections if runs(item) else None,
                     restart=plan_json(item.restart), restart_problem=item.restart_problem or None,
                     start=plan_json(item.start), start_problem=item.start_problem or None)
     return data
@@ -2008,11 +2329,14 @@ def visible(rows: List[Listener], terms: List[str], show_all: bool) -> List[List
 
 
 def summary_segments(groups: List[Group]) -> List[Segment]:
-    """2 projects · 4 ports, and · 1 down in red when a stack port is."""
+    """2 projects · 4 ports, then · 1 down in red when a stack port is, and · 3 idle for idle worktrees."""
     rows = [item for group in groups for item in group.rows]
-    down = sum(1 for item in rows if item.is_down)
-    segments = [(f"{plural(len(groups), 'project', 'projects')} · {plural(len(rows) - down, 'port', 'ports')}", DIM)]
-    return segments + ([(" · ", DIM), (f"{down} down", GONE)] if down else [])
+    down, idle = sum(1 for item in rows if item.is_down), sum(1 for item in rows if item.is_idle)
+    projects = sum(1 for group in groups if any(not item.is_idle for item in group.rows))
+    ports = sum(1 for item in rows if runs(item))
+    segments = [(f"{plural(projects, 'project', 'projects')} · {plural(ports, 'port', 'ports')}", DIM)]
+    segments += [(" · ", DIM), (f"{down} down", GONE)] if down else []
+    return segments + ([(" · ", DIM), (f"{idle} idle", DIM)] if idle else [])
 
 
 def show_list(rows: List[Listener], terms: List[str], show_all: bool, paint: Paint) -> int:
@@ -2052,7 +2376,7 @@ class DownClock:
     def update(self, rows: List[Listener], now: Optional[float] = None) -> None:
         """Note this scan, and give its down rows their time; 0 when the port was down from the first scan on."""
         now = time.time() if now is None else now
-        listening = {item.port for item in rows if not item.is_down}
+        listening = {item.port for item in rows if runs(item)}
         for port in self.listening - listening:
             self.went_down.setdefault(port, now)
         for port in listening:
@@ -2080,16 +2404,17 @@ class Scanner(threading.Thread):
 
     def run(self) -> None:
         while True:
+            problems: List[str] = []
             try:
-                rows = with_down_ports(one_per_port(read_listeners(deep=True)))
+                rows = with_idle_worktrees(with_down_ports(one_per_port(read_listeners(deep=True))), problems.append)
                 self.clock.update(rows)
                 add_start_plans(rows, self.seen)
             except Exception as error:  # the view stays up and shows what went wrong
                 with self.lock:
                     self.error = f"scan failed: {error}"
             else:
-                with self.lock:
-                    self.rows, self.version, self.error = rows, self.version + 1, ""
+                with self.lock:  # a problem keeping the known repos shows where a failed scan does
+                    self.rows, self.version, self.error = rows, self.version + 1, "; ".join(problems)
                     self.scanned_at = time.monotonic()
             self.wake.wait(self.interval)
             self.wake.clear()
@@ -2241,9 +2566,9 @@ class LiveView:
         ("l", "follow its output"),
         ("r", "restart it the way it was started"),
         ("k", "stop it"),
-        ("u", "start a stack's port that is down, the way wt started it"),
+        ("u", "start a stack's port that is down, the way wt started it, or an idle worktree's stack"),
         ("R K", "restart or stop every port of its stack or project"),
-        ("U", "start every port of its stack that is down; what runs keeps running"),
+        ("U", "start every port of its stack that is down, or an idle worktree's stack; what runs keeps running"),
         ("/", "filter by project, branch, folder or tool; enter keeps it"),
         ("esc", "clear the filter"),
         ("a", "show apps and helper processes too, or hide them again"),
@@ -2256,15 +2581,15 @@ class LiveView:
         self.filter, self.show_all, self.editing = " ".join(terms), show_all, False
         self.all_rows: List[Listener] = []
         self.groups: List[Group] = []
-        self.order: List[int] = []  # ports in the order they are listed
-        self.selected: Optional[int] = None
+        self.order: List[RowKey] = []  # rows in the order they are listed, by row_key
+        self.selected: Optional[RowKey] = None
         self.last_index = 0
         self.scroll = 0
         self.version, self.error, self.scanned_at = 0, "", 0.0
         self.confirm: Optional[Tuple[str, List[Listener], str]] = None  # question, targets, stop or restart
         self.busy, self.busy_lock = "", threading.Lock()
         self.message, self.message_tone, self.message_at = "", "", 0.0
-        self.row_at: Dict[int, int] = {}  # screen line to port, for the mouse
+        self.row_at: Dict[int, RowKey] = {}  # screen line to row, for the mouse
         self.showing_keys = False  # ? shows every key over the list, until the next key
 
     # --- state
@@ -2280,7 +2605,7 @@ class LiveView:
         where it was; a new filter starts at the top."""
         rows = visible(self.all_rows, self.filter.split(), self.show_all)
         self.groups = group_rows(rows)
-        self.order = [item.port for group in self.groups for item in group.rows]
+        self.order = [row_key(item) for group in self.groups for item in group.rows]
         if self.selected not in self.order:
             index = 0 if from_top else min(self.last_index, len(self.order) - 1)
             self.selected = self.order[index] if self.order else None
@@ -2288,10 +2613,11 @@ class LiveView:
             self.last_index = self.order.index(self.selected)
 
     def current(self) -> Optional[Listener]:
-        return next((item for group in self.groups for item in group.rows if item.port == self.selected), None)
+        return next((item for group in self.groups for item in group.rows if row_key(item) == self.selected), None)
 
     def current_group(self) -> Optional[Group]:
-        return next((group for group in self.groups if any(item.port == self.selected for item in group.rows)), None)
+        return next((group for group in self.groups if any(row_key(item) == self.selected for item in group.rows)),
+                    None)
 
     def move(self, delta: int) -> None:
         if not self.order:
@@ -2359,16 +2685,17 @@ class LiveView:
         if not item or not group or self.is_busy():
             return
         verb = "Stop" if action == "stop" else "Restart"
-        if item.is_down and not whole_group:
+        if not runs(item) and not whole_group:
             hint = "; u starts it" if item.start else ""
-            self.say(f"{item.port} {label(item)} is down: nothing runs to {action}{hint}", DIM)
+            what = f"{group_name(group)} is idle" if item.is_idle else f"{item.port} {label(item)} is down"
+            self.say(f"{what}: nothing runs to {action}{hint}", DIM)
             return
         if action == "restart" and not whole_group and not (item.container or item.restart):
             self.say(f"{item.port} cannot restart: {item.restart_problem or 'no restart plan'}", DIM)
             return
         if whole_group:
             name = group_name(group)
-            running = [row for row in group.rows if not row.is_down]
+            running = [row for row in group.rows if runs(row)]
             if not running:  # a filter can leave only down rows
                 self.say(f"nothing runs in {name} to {action}", DIM)
                 return
@@ -2384,7 +2711,12 @@ class LiveView:
         item, group = self.current(), self.current_group()
         if not item or not group or self.is_busy():
             return
-        if whole_group:
+        if item.is_idle:  # the row is the whole stack
+            if item.start:
+                self.confirm = (f"Start {group_name(group)} with {shown_command(item.start)}?", [item], "start")
+            else:
+                self.say(f"cannot start {group_name(group)}: {item.start_problem}", DIM)
+        elif whole_group:
             down, name = [row for row in group.rows if row.is_down], group_name(group)
             doable = [row for row in down if row.start]
             if not down:
@@ -2407,14 +2739,15 @@ class LiveView:
             "start": "starting {}, waiting until it listens"}
 
     def run_in_background(self, action: str, targets: List[Listener]) -> None:
-        names = " ".join(str(item.port) for item in targets)
+        names = " ".join(map(name_of, targets))
+        named = {row_key(item): name_of(item) for item in targets}
         self.busy = self.BUSY[action].format(names)
         self.message = ""  # the spinner line shows only what is said while it runs
 
         def work() -> None:
             try:
                 results = {"stop": stop_many, "restart": restart_many, "start": start_many}[action](targets)
-                problems = [f"{port}: {problem}" for port, problem in results.items() if problem]
+                problems = [f"{named.get(key, key)}: {problem}" for key, problem in results.items() if problem]
                 if problems:
                     outcome = (("still taken, " if action == "stop" else "") + "; ".join(problems), GONE)
                 else:
@@ -2522,8 +2855,11 @@ class LiveView:
 
     def detail_segments(self, item: Listener, width: int) -> List[List[Segment]]:
         url = url_of(item)
-        lines = [[(" ", ""), (str(item.port), BOLD), ("  ", ""), (label(item), BOLD)]
-                 + ([("  ", ""), (url, LINK)] if url else [])]
+        if item.is_idle:
+            lines = [[(" ", ""), (item.place.branch, BOLD), ("  ", ""), ("idle", DIM)]]
+        else:
+            lines = [[(" ", ""), (str(item.port), BOLD), ("  ", ""), (label(item), BOLD)]
+                     + ([("  ", ""), (url, LINK)] if url else [])]
         fields = detail_fields(item, self.all_rows)
         key_w = max(len(key) for key, *_ in fields) + 2
         for key, value, tone, note in fields:
@@ -2566,10 +2902,10 @@ class LiveView:
         item, group = self.current(), self.current_group()
         if not item or not group:
             return {"?"}
-        running = any(not row.is_down for row in group.rows)
+        running = any(runs(row) for row in group.rows)
         checks = {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log),
                   "r": bool(item.container or item.restart),
-                  "k": not item.is_down and not is_docker_itself(item), "u": bool(item.start),
+                  "k": runs(item) and not is_docker_itself(item), "u": bool(item.start),
                   "R": running, "K": running, "U": any(row.start for row in group.rows), "?": True}
         return {key for key, on in checks.items() if on}
 
@@ -2628,10 +2964,10 @@ class LiveView:
             self.put(top, 4, empty, styles.normal[DIM])
         for offset, (row, _, segments) in enumerate(lines[self.scroll: self.scroll + bottom - top]):
             y = top + offset
-            chosen = row is not None and row.port == self.selected
+            chosen = row is not None and row_key(row) == self.selected
             self.put_segments(y, segments, styles.selected if chosen else styles.normal, fill=chosen)
             if row is not None:
-                self.row_at[y] = row.port
+                self.row_at[y] = row_key(row)
         above = sum(1 for row, _, _ in lines[: self.scroll] if row)
         below = sum(1 for row, _, _ in lines[self.scroll + bottom - top:] if row)
         if above:
@@ -2649,7 +2985,8 @@ class LiveView:
 
     def keep_visible(self, lines: List[Line], room: int) -> None:
         """Scroll so the selected row shows, with its group's header when it is the first row."""
-        index = next((i for i, (row, _, _) in enumerate(lines) if row is not None and row.port == self.selected), None)
+        index = next((i for i, (row, _, _) in enumerate(lines) if row is not None and row_key(row) == self.selected),
+                     None)
         if index is not None:
             first = index - 1 if index > 0 and lines[index - 1][0] is None and lines[index - 1][1] else index
             if first < self.scroll:
@@ -2689,6 +3026,8 @@ HELP = """\
   portly kill wt1          stop everything of a project or stack (asks first)
   portly restart 3000      stop it and start it again the way it was started (also: restart wt1)
   portly up wt1            start the ports of a wt stack that are down, the way wt started them
+                           (an idle worktree's stack: wt up)
+  portly forget shop       stop showing shop's idle worktrees, until something runs in it
   portly open 3000/admin   open http://localhost:3000/admin in your browser (https for symfony)
   portly logs 3000         follow its output: docker logs, or the file it writes to
   portly free 3000         the first free port from 3000 on
@@ -2742,6 +3081,8 @@ def cmd_show(argv: List[str]) -> int:
     rows = with_down_ports(one_per_port(read_listeners(deep=bool(ports))))
     if ports:
         add_start_plans([item for item in rows if item.port in ports])
+    else:
+        rows = with_idle_worktrees(rows)
     if args.json:
         chosen = [item for item in rows if item.port in ports] if ports else visible(rows, terms, args.all)
         print(json.dumps([as_json(item, deep=bool(ports)) for item in chosen], indent=2, ensure_ascii=False))
@@ -2788,9 +3129,29 @@ def cmd_up(argv: List[str]) -> int:
     parser.add_argument("-y", "--yes", action="store_true", help="start a stack's ports without asking")
     args = parser.parse_args(argv)
     ports, terms = targets_of(parser, args.targets)
-    rows = with_down_ports(one_per_port(read_listeners()))
+    rows = with_idle_worktrees(with_down_ports(one_per_port(read_listeners())))
     add_start_plans(pick_targets(rows, ports, terms)[0])
     return bring_up(rows, ports, terms, args.yes, paint_for_stdout())
+
+
+def cmd_forget(argv: List[str]) -> int:
+    parser = parser_for("forget", "Stop showing a repo's idle worktrees, until something runs in it again.")
+    parser.add_argument("repos", nargs="+", metavar="repo", help="a repo's name, or the folder of its main checkout")
+    args = parser.parse_args(argv)
+    paint, known, lines, unknown = paint_for_stdout(), read_known_repos(), [], False
+    kept = list(known)
+    for name in args.repos:
+        gone = [common for common in kept if name in (repo_name(common), main_checkout(common))
+                or os.path.realpath(name) == main_checkout(common)]
+        kept = [common for common in kept if common not in gone]
+        unknown = unknown or not gone
+        lines += [f"  Forgot {paint(BOLD, repo_name(common))}  {paint(DIM, tilde(main_checkout(common)))}"
+                  for common in gone] or [f"  portly does not know {paint(BOLD, name)}."]
+    if kept != known:
+        write_known_repos(kept)
+        lines.append(paint(DIM, "  Its worktrees show again once something runs in it."))
+    print("\n" + "\n".join(lines) + "\n")
+    return 1 if unknown else 0
 
 
 def cmd_open(argv: List[str]) -> int:
@@ -2908,7 +3269,7 @@ def cmd_live(argv: List[str]) -> int:
 
 
 COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_restart, "up": cmd_up,
-            "open": cmd_open, "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
+            "forget": cmd_forget, "open": cmd_open, "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
             # The Dutch names from its days as poort, so scripts and habits keep working.
             "lijst": cmd_show, "herstart": cmd_restart, "vrij": cmd_free, "wacht": cmd_wait}
 

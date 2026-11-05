@@ -60,9 +60,13 @@ def _refused_docker(args, timeout):
 
 portly.send = _guarded_send
 portly.docker = _refused_docker
+# portly's own files, such as the repos it knows, go to a folder of the test run's own, never to ~/.cache.
+_CACHE = tempfile.TemporaryDirectory(prefix="portly-cache-")
+portly.CACHE = _CACHE.name
 
 
 def tearDownModule():
+    _CACHE.cleanup()
     if VIOLATIONS:
         raise AssertionError("tests reached processes they did not start: " + "; ".join(VIOLATIONS))
 
@@ -727,7 +731,8 @@ class JsonTest(unittest.TestCase):
         data = json.loads(json.dumps(portly.as_json(item)))
         self.assertEqual(data["project"], {"repo": "shop", "branch": "fix/a", "worktree": True,
                                            "path": "/t", "folder": "apps/web"})
-        self.assertEqual(data["stack"], {"name": "shop", "index": 1, "role": "web", "up": None, "of": None})
+        self.assertEqual(data["stack"], {"name": "shop", "index": 1, "role": "web", "up": None, "of": None,
+                                         "ports": {"web": 20110}})
         self.assertEqual((data["pid"], data["container"], data["running_seconds"]), (7, None, 120))
         self.assertNotIn("connections", data)
 
@@ -2315,8 +2320,8 @@ class CommandTest(unittest.TestCase):
         [data] = json.loads(out)
         self.assertEqual((data["port"], data["pid"], data["cwd"]), (port, proc.pid, os.path.realpath(self.folder)))
         self.assertEqual(sorted(data), sorted([
-            "port", "name", "down", "url", "addresses", "local_only", "project", "stack", "container", "pid",
-            "last_lines",
+            "port", "name", "down", "idle", "url", "addresses", "local_only", "project", "stack", "container", "pid",
+            "last_lines", "last_ran_seconds",
             "command", "cwd", "folder_gone", "running_seconds", "memory_kb", "others",
             "log", "parent", "connections", "restart", "restart_problem", "start", "start_problem"]))
 
@@ -2578,6 +2583,257 @@ class PlaceTest(unittest.TestCase):
     def test_has_no_place_outside_git(self):
         self.assertIsNone(portly.place_of(self.tmp.name))
         self.assertIsNone(portly.place_of("/"))
+
+
+FAKE_WT = """#!/bin/sh
+# wt up <branch>: starts the web of stack 3 the way wt does, in the background, its pid in wt's pid file.
+[ "$1 $2" = "up feat/old" ] || { echo "wt: no worktree for $2" >&2; exit 1; }
+cd "%(tree)s" || exit 1
+nohup "%(python)s" server.py %(port)s >"%(registry)s/logs/3-web.log" 2>&1 </dev/null &
+echo $! >"%(registry)s/3-web.pid"
+echo "wt: started web"
+"""
+
+
+class IdleWorktreeTest(unittest.TestCase):
+    """Repo shop: fix/cart runs a server; feat/old is wt's stack 3, stopped
+    two days ago; spike has no stack; feat/down is stack 4, whose servers
+    crashed and left wt's pid files; the folder of gone was removed."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = os.path.realpath(tmp.name)
+        self.addCleanup(setattr, portly, "CACHE", portly.CACHE)
+        portly.CACHE = os.path.join(root, "cache")
+        self.main = os.path.join(root, "shop")
+        os.makedirs(self.main)
+        git("init", "-q", "-b", "main", cwd=self.main)
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init", cwd=self.main)
+        self.trees = {}
+        for branch in ("fix/cart", "feat/old", "spike", "feat/down", "gone"):
+            self.trees[branch] = os.path.join(root, "trees", branch.replace("/", "-"))
+            git("worktree", "add", "-q", "-b", branch, self.trees[branch], cwd=self.main)
+        subprocess.run(["rm", "-rf", self.trees["gone"]], check=True)
+        self.common = os.path.join(self.main, ".git")
+        self.registry = os.path.join(self.common, "shop-worktrees")
+        os.makedirs(os.path.join(self.registry, "logs"))
+        self.entry(3, "feat/old", "web=20130 api=20131 db=20132 mail=20133")
+        self.entry(4, "feat/down", "web=20140 api=20141")
+        two_days_ago = time.time() - 2 * 86400 - 60
+        self.log("3-web.log", "stopped\n", two_days_ago)
+        for role in ("web", "api"):
+            open(os.path.join(self.registry, f"4-{role}.pid"), "w").close()
+        self.log("4-api.log", "PHP Fatal error: out of memory\n")
+        self.busy = listener(20110, 7, args="node x/node_modules/.bin/vite", cwd=self.trees["fix/cart"],
+                             place=portly.place_of(self.trees["fix/cart"]))
+
+    def entry(self, index, branch, ports):
+        with open(os.path.join(self.registry, f"{index}.env"), "w") as entry:
+            entry.write(f'REG_BRANCH="{branch}"\nREG_PATH="{self.trees[branch]}"\nREG_PORTS="{ports}"\n')
+
+    def log(self, name, text, when=None):
+        path = os.path.join(self.registry, "logs", name)
+        with open(path, "w") as log:
+            log.write(text)
+        if when:
+            os.utime(path, (when, when))
+
+    def stopped(self):
+        return {(item.place.branch, item.port, item.is_down, item.is_idle): item
+                for item in portly.stopped_worktrees([self.busy], [self.common])}
+
+    def test_remembers_the_repos_it_saw_while_they_exist(self):
+        self.assertEqual(portly.remember_repos([self.busy]), [self.common])
+        self.assertEqual(portly.remember_repos([]), [self.common])
+        with open(portly.known_repos_file(), "a") as known:
+            known.write("/no/such/repo/.git\n")
+        self.assertEqual(portly.remember_repos([]), [self.common])
+        self.assertEqual(portly.read_known_repos(), [self.common])
+
+    def test_finds_each_worktree_where_nothing_runs(self):
+        found = self.stopped()
+        self.assertEqual(sorted(found), [("feat/down", 20140, True, False), ("feat/down", 20141, True, False),
+                                         ("feat/old", 0, False, True), ("spike", 0, False, True)])
+        old, spike = found[("feat/old", 0, False, True)], found[("spike", 0, False, True)]
+        self.assertEqual((old.stack.index, old.cwd, old.place.repo, old.place.is_worktree),
+                         (3, self.trees["feat/old"], "shop", True))
+        self.assertAlmostEqual(old.idle_since, time.time() - 2 * 86400 - 60, delta=5)
+        self.assertEqual((spike.stack, spike.start, spike.start_problem),
+                         (None, None, "portly does not know how to start it: it has no wt stack"))
+        self.assertEqual(found[("feat/down", 20141, True, False)].last_output, ["PHP Fatal error: out of memory"])
+
+    def test_a_port_gets_one_row_also_when_a_crashed_stack_shares_it(self):
+        other = portly.Listener(20140, 0, "web", is_down=True, place=portly.place_of(self.main))
+        found = portly.stopped_worktrees([self.busy, other], [self.common])
+        self.assertEqual(sorted(item.port for item in found if item.place.branch == "feat/down"), [20141])
+
+    def test_lists_worktrees_again_only_when_one_comes_goes_or_switches(self):
+        portly.WORKTREES.clear()
+        calls = []
+        self.addCleanup(setattr, portly, "run", portly.run)
+        real = portly.run
+        portly.run = lambda cmd: calls.append(cmd[3:5]) or real(cmd)
+        for _ in range(2):
+            portly.worktrees(self.common)
+        git("checkout", "-q", "-b", "fix/other", cwd=self.trees["spike"])
+        self.assertIn((self.trees["spike"], "fix/other"), portly.worktrees(self.common))
+        self.assertEqual(calls, [["worktree", "list"]] * 2)
+
+    def test_a_cache_it_cannot_write_is_said_and_the_scan_still_shows(self):
+        blocked = os.path.join(portly.CACHE, "file")
+        os.makedirs(portly.CACHE)
+        open(blocked, "w").close()
+        portly.CACHE = blocked  # a file, so nothing can be written under it
+        problems = []
+        rows = portly.with_idle_worktrees([self.busy], problems.append)
+        self.assertEqual(len(problems), 1)
+        self.assertRegex(problems[0], r"^cannot keep the repos it knows in .*file/repos: ")
+        self.assertIn("feat/old", {item.place.branch for item in rows})
+
+    def test_up_tells_two_idle_stacks_apart(self):
+        self.addCleanup(setattr, portly, "find_wt", portly.find_wt)
+        portly.find_wt = lambda main: "/opt/wt"
+        self.entry(5, "spike", "web=20150")
+        rows = portly.with_idle_worktrees([self.busy])
+        targets, _ = portly.pick_targets(rows, [], ["wt3", "wt5"])
+        self.assertEqual([portly.name_of(item) for item in targets], ["wt3", "wt5"])
+        self.addCleanup(setattr, portly, "start_many", portly.start_many)
+        started = []
+        portly.start_many = lambda rows: started.extend(map(portly.name_of, rows)) or {
+            portly.row_key(item): None for item in rows}
+        with contextlib.redirect_stdout(io.StringIO()):
+            portly.bring_up(rows, [], ["wt3", "wt5"], True, portly.Paint(False))
+        self.assertEqual(started, ["wt3", "wt5"])
+
+    def test_a_stack_with_a_port_that_listens_elsewhere_is_not_idle(self):
+        container = listener(20131, 9, args="mysqld", cwd=self.main, place=portly.place_of(self.main))
+        found = portly.stopped_worktrees([self.busy, container], [self.common])
+        self.assertNotIn("feat/old", {item.place.branch for item in found})
+
+    def test_shows_an_idle_worktree_as_one_dim_line(self):
+        self.addCleanup(setattr, portly, "find_wt", portly.find_wt)
+        portly.find_wt = lambda main: ""
+        rows = portly.with_idle_worktrees([self.busy])
+        groups = portly.group_rows(portly.visible(rows, [], False))
+        lines = portly.render_groups(groups, portly.Paint(False), 100)
+        self.assertIn("  shop · feat/old · wt3  ○ idle · ports 20130-20133 · last ran 2d ago", lines)
+        self.assertIn("  shop · spike · worktree  ○ idle", lines)
+        self.assertIn("shop · feat/down · wt4  0/2 up", "\n".join(lines))
+        self.assertEqual("".join(text for text, _ in portly.summary_segments(groups)),
+                         "2 projects · 1 port · 2 down · 2 idle")
+        self.assertEqual([item.port for item in portly.visible(rows, ["wt3"], False)], [0])
+
+    def test_tells_how_an_idle_stack_starts(self):
+        wt = os.path.join(self.main, portly.WT_SHIPPED)
+        os.makedirs(os.path.dirname(wt))
+        with open(wt, "w") as script:
+            script.write("#!/bin/sh\n")
+        os.chmod(wt, 0o755)
+        old = self.stopped()[("feat/old", 0, False, True)]
+        self.assertEqual((old.start.argv, old.start.cwd, old.start_problem), ([wt, "up", "feat/old"], self.main, ""))
+        fields = {key: value for key, value, _, _ in portly.detail_fields(old)}
+        self.assertEqual({key: fields[key] for key in ("state", "ports", "start")},
+                         {"state": "idle", "ports": "20130 web · 20131 api · 20132 db · 20133 mail",
+                          "start": f"wt up feat/old in {portly.tilde(self.main)}"})
+        self.assertEqual(portly.hints_for(old), ["portly up wt3"])
+        data = json.loads(json.dumps(portly.as_json(old, deep=True)))
+        self.assertEqual((data["port"], data["idle"], data["pid"], data["stack"]["ports"]["mail"]),
+                         (None, True, None, 20133))
+        self.assertAlmostEqual(data["last_ran_seconds"], 2 * 86400 + 60, delta=5)
+        detached = portly.idle_row(portly.replace(old.place, branch="HEAD"), old.stack, wt)
+        self.assertEqual(detached.start_problem, "its HEAD is detached, and wt up needs a branch")
+
+    def view(self):
+        rows = portly.with_idle_worktrees([self.busy])
+        view = portly.LiveView(None, FakeScanner(rows), [], False)
+        view.pull()
+        self.acted = []
+        view.run_in_background = lambda action, targets: self.acted.append((action, [portly.name_of(i) for i in targets]))
+        return view
+
+    def test_the_live_view_starts_an_idle_stack_with_u(self):
+        self.addCleanup(setattr, portly, "find_wt", portly.find_wt)
+        portly.find_wt = lambda main: "/opt/wt"
+        view = self.view()
+        while view.selected != self.trees["feat/old"]:
+            view.handle("down")
+        self.assertEqual([text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT],
+                         ["↑↓", "u", "U", "?"])
+        self.assertEqual(view.detail_segments(view.current(), 100)[0][1], ("feat/old", portly.BOLD))
+        view.handle("k")
+        self.assertEqual(view.message, "shop wt feat/old is idle: nothing runs to stop; u starts it")
+        view.handle("U")
+        self.assertEqual(view.confirm[0], "Start shop wt feat/old with wt up feat/old?")
+        view.handle("y")
+        self.assertEqual(view.order[-2:], [20110, self.trees["spike"]])  # groups by branch: fix/cart, then spike
+        view.handle("end")
+        view.handle("u")
+        self.assertEqual(view.message, "cannot start shop wt spike: portly does not know how to start it: it has no wt stack")
+        self.assertEqual(self.acted, [("start", ["wt3"])])
+
+    def fake_wt(self):
+        """A wt that starts the web of stack 3 on a free port; that port."""
+        port = unused_port()
+        tree = self.trees["feat/old"]
+        with open(os.path.join(tree, "server.py"), "w") as script:
+            script.write(SERVER)
+        wt = os.path.join(self.main, portly.WT_SHIPPED)
+        os.makedirs(os.path.dirname(wt))
+        with open(wt, "w") as script:
+            script.write(FAKE_WT % {"tree": tree, "python": sys.executable, "port": port, "registry": self.registry})
+        os.chmod(wt, 0o755)
+        self.entry(3, "feat/old", f"web={port}")
+        self.addCleanup(self.stop_server, port, tree)
+        return port
+
+    def stop_server(self, port, tree):
+        """The fake wt's server outlives the wt that started it, as wt's do, so
+        it is no descendant of this run for the fence: stop what listens on
+        its port once its command and folder show it is that server."""
+        procs, cwds = portly.read_processes(), portly.read_cwds(set(portly.listening_pids(port)))
+        for pid in portly.listening_pids(port):
+            if procs.get(pid, (0, ""))[1].endswith(f"server.py {port}") and cwds.get(pid) == tree:
+                os.kill(pid, portly.signal.SIGKILL)
+
+    def test_starts_an_idle_stack_with_wt_up_and_waits_for_its_ports(self):
+        port = self.fake_wt()
+        old = self.stopped()[("feat/old", 0, False, True)]
+        self.assertEqual(portly.start_many([old]), {self.trees["feat/old"]: None})
+        with open(os.path.join(self.registry, "3-web.pid")) as written:
+            self.assertEqual(portly.listening_pids(port), [int(written.read())])
+        with open(os.path.join(portly.CACHE, "shop-wt3.log")) as log:
+            self.assertIn("wt: started web", log.read())
+
+    def test_says_why_wt_up_failed(self):
+        self.fake_wt()
+        old = self.stopped()[("feat/old", 0, False, True)]
+        old.start = portly.replace(old.start, argv=[old.start.argv[0], "up", "feat/nope"])
+        log = portly.tilde(os.path.join(portly.CACHE, "shop-wt3.log"))
+        self.assertEqual(portly.start_many([old]), {self.trees["feat/old"]: f"wt: no worktree for feat/nope (see {log})"})
+
+    def test_up_starts_an_idle_stack_by_its_word(self):
+        self.addCleanup(setattr, portly, "find_wt", portly.find_wt)
+        portly.find_wt = lambda main: "/opt/wt"
+        rows = portly.with_idle_worktrees([self.busy])
+        asked, started, out = [], [], io.StringIO()
+        self.addCleanup(setattr, portly, "start_many", portly.start_many)
+        portly.start_many = lambda rows: started.extend(map(portly.name_of, rows)) or {
+            portly.row_key(item): None for item in rows}
+        with contextlib.redirect_stdout(out):
+            code = portly.bring_up(rows, [], ["wt3"], False, portly.Paint(False), ask=lambda q: asked.append(q) or True)
+        self.assertEqual((code, asked, started), (0, ["  Start 1 stack? [y/N] "], ["wt3"]))
+        self.assertIn(f"wt3  idle  wt up feat/old in {portly.tilde(self.main)}", out.getvalue())
+        self.assertIn("wt3 is up.", out.getvalue())
+
+    def test_forget_drops_a_repo_until_something_runs_in_it(self):
+        portly.remember_repos([self.busy])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(portly.main(["forget", "shop", "nope"]), 1)
+        self.assertIn(f"Forgot shop  {portly.tilde(self.main)}", out.getvalue())
+        self.assertIn("portly does not know nope.", out.getvalue())
+        self.assertEqual(portly.read_known_repos(), [])
 
 
 class FuzzTest(unittest.TestCase):
