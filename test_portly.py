@@ -10,6 +10,7 @@ import os
 import pty
 import random
 import select
+import shlex
 import socket
 import struct
 import subprocess
@@ -224,6 +225,7 @@ class LiveViewTest(unittest.TestCase):
         return [text for text, tone in self.view.footer_segments(200)[0] if tone == portly.ACCENT]
 
     def test_the_key_row_shows_only_the_keys_for_the_selected_row(self):
+        # The fixture folders do not exist, so there is no e to open one.
         self.assertEqual(self.keys(), ["↑↓", "o", "k", "RK", "?"])
         self.rows[0].log = "/x/web.log"
         self.rows[0].restart = portly.Restart(["pnpm", "dev"], "/x/shop/apps/web", [10, 1], "/x/web.log")
@@ -241,7 +243,7 @@ class LiveViewTest(unittest.TestCase):
         self.press("?", "resize")
         self.assertTrue(self.view.showing_keys)
         listed = ["".join(text for text, _ in line).split()[0] for line in self.view.keys_lines()[2:]]
-        self.assertEqual(listed, ["↑↓", "o", "c", "l", "r", "k", "u", "R", "U", "/", "esc", "a", "?", "q"])
+        self.assertEqual(listed, ["↑↓", "o", "c", "l", "e", "r", "k", "u", "R", "U", "/", "esc", "a", "?", "q"])
         self.press("k")
         self.assertEqual((self.view.showing_keys, self.view.confirm), (False, None))
         self.press("?", "q")
@@ -430,6 +432,92 @@ class FakeScreen:
         if not self.queue:
             raise portly.curses.error("no input")
         return self.queue.pop(0)
+
+
+def without_editors(test):
+    """No editor variable set while test runs; they come back after it."""
+    for name in portly.EDITOR_VARIABLES:
+        if name in os.environ:
+            test.addCleanup(os.environ.__setitem__, name, os.environ[name])
+        else:
+            test.addCleanup(os.environ.pop, name, None)
+        os.environ.pop(name, None)
+
+
+def recording_editor(test):
+    """An editor command that writes the folders it gets, one per line, to a
+    file; the command and that file."""
+    out = os.path.join(tempfile.mkdtemp(prefix="portly-editor-"), "opened")
+    test.addCleanup(subprocess.run, ["rm", "-rf", os.path.dirname(out)])
+    code = "import sys; open(sys.argv[1], 'w').write(chr(10).join(sys.argv[2:]))"
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} {shlex.quote(out)}", out
+
+
+class EditTest(unittest.TestCase):
+    def setUp(self):
+        without_editors(self)
+        self.folder = os.path.realpath(tempfile.mkdtemp(prefix="portly-edit-"))
+        self.addCleanup(os.rmdir, self.folder)
+
+    def test_opens_a_checkout_s_top_a_folder_outside_git_or_a_compose_folder(self):
+        checkout = listener(3000, 1, cwd="/x/shop/apps/web", place=place(sub="apps/web"))
+        outside = listener(3001, 2, cwd=self.folder)
+        container = listener(5432, 3, cwd="/", place=place())
+        container.container = portly.Container("db", "postgres", "Up", "shop", "db", "/x/shop/docker")
+        app = listener(8765, 4, cwd="/")
+        gone = listener(3002, 5, cwd=self.folder + "-removed")
+        self.assertEqual([portly.folder_of(item) for item in (checkout, outside, container, app, gone)],
+                         ["/x/shop", self.folder, "/x/shop/docker", "", self.folder + "-removed"])
+        self.assertEqual([portly.can_edit(item) for item in (outside, app, gone)], [True, False, False])
+
+    def test_builds_the_command_from_the_first_editor_that_is_set(self):
+        self.assertEqual(portly.editor_command(["/x"]),
+                         (None, 'no editor set: set PORTLY_EDITOR, such as PORTLY_EDITOR="open -a Cursor"'))
+        os.environ["EDITOR"] = "nvim"
+        self.assertEqual(portly.editor_command(["/x"]), (["nvim", "/x"], ""))
+        os.environ["VISUAL"] = "code -w"
+        self.assertEqual(portly.editor_command(["/x", "/y"]), (["code", "-w", "/x", "/y"], ""))
+        os.environ["PORTLY_EDITOR"] = 'open -a "Cursor App"'
+        self.assertEqual(portly.editor_command(["/x"]), (["open", "-a", "Cursor App", "/x"], ""))
+        os.environ["PORTLY_EDITOR"] = 'open -a "Cursor'
+        self.assertEqual(portly.editor_command(["/x"]), (None, "cannot read PORTLY_EDITOR: No closing quotation"))
+
+    def test_e_opens_the_selected_folder_and_comes_back(self):
+        row = listener(3000, 1, cwd=self.folder, place=place(top=self.folder))
+        view = portly.LiveView(None, FakeScanner([row]), [], False)
+        view.pull()
+        view.outside = lambda action: action()  # no curses to put away here
+        quiet = contextlib.redirect_stdout(io.StringIO())  # the line the view prints before the editor runs
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+        self.assertIn("e", [text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT])
+        view.handle("e")
+        self.assertEqual(view.message, 'no editor set: set PORTLY_EDITOR, such as PORTLY_EDITOR="open -a Cursor"')
+        os.environ["PORTLY_EDITOR"], opened = recording_editor(self)
+        view.handle("e")
+        with open(opened) as written:
+            self.assertEqual(written.read(), self.folder)
+        name = portly.editor_name(shlex.split(os.environ["PORTLY_EDITOR"]) + [self.folder], 1)
+        self.assertTrue(name.startswith(os.path.basename(sys.executable) + " -c "))
+        self.assertEqual(view.message, f"opened {portly.tilde(self.folder)} with {name}")
+        view.outside = lambda action: None  # ctrl-c in the editor
+        view.handle("e")
+        self.assertEqual(view.message, f"left {name} with ctrl-c")
+        view.outside = lambda action: action()
+        for editor, said in (("false", "false ended with code 1"),
+                             ("/no/such/editor", "cannot run /no/such/editor: No such file or directory")):
+            os.environ["PORTLY_EDITOR"] = editor
+            view.handle("e")
+            self.assertEqual((view.message, view.message_tone), (said, portly.GONE))
+        view.all_rows, view.selected = [listener(8765, 4, cwd="/")], None
+        view.rebuild()
+        view.handle("e")
+        self.assertEqual(view.message, "no folder to open for this row")
+        view.all_rows, view.selected = [listener(3001, 5, cwd=self.folder + "-removed")], None
+        view.rebuild()
+        self.assertNotIn("e", [text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT])
+        view.handle("e")
+        self.assertEqual(view.message, f"its folder is gone: {portly.tilde(self.folder)}-removed")
 
 
 class KeyReaderTest(unittest.TestCase):
@@ -1251,7 +1339,7 @@ class DownPortTest(unittest.TestCase):
     def test_u_starts_a_down_port_and_U_every_down_port_of_its_stack(self):
         view = self.view(self.with_plans())
         view.handle("down")
-        self.assertEqual((view.selected, self.keys(view)), (20110, ["↑↓", "o", "k", "RKU", "?"]))
+        self.assertEqual((view.selected, self.keys(view)), (20110, ["↑↓", "o", "e", "k", "RKU", "?"]))
         view.handle("u")
         self.assertEqual((view.confirm, view.message), (None, "20110 vite runs already"))
         view.handle("U")
@@ -1259,7 +1347,7 @@ class DownPortTest(unittest.TestCase):
         view.handle("y")
         view.handle("down")
         view.message = ""  # the key row shows once nothing is said
-        self.assertEqual((view.selected, self.keys(view)), (20111, ["↑↓", "l", "u", "RKU", "?"]))
+        self.assertEqual((view.selected, self.keys(view)), (20111, ["↑↓", "l", "e", "u", "RKU", "?"]))
         view.handle("r")
         self.assertEqual(view.message, "20111 api is down: nothing runs to restart; u starts it")
         view.handle("u")
@@ -1269,7 +1357,7 @@ class DownPortTest(unittest.TestCase):
         view.handle("u")
         self.assertEqual((view.confirm, view.message), (None, "20112 cannot start: wt starts no server for mail"))
         view.message = ""
-        self.assertEqual(self.keys(view), ["↑↓", "RKU", "?"])
+        self.assertEqual(self.keys(view), ["↑↓", "e", "RKU", "?"])
         for key in ("up", "u", "n"):
             view.handle(key)
         self.assertEqual(view.message, "nothing started")
@@ -1278,7 +1366,7 @@ class DownPortTest(unittest.TestCase):
     def test_U_says_why_nothing_starts(self):
         view = self.view()
         view.handle("down")
-        self.assertEqual(self.keys(view), ["↑↓", "o", "k", "RK", "?"])
+        self.assertEqual(self.keys(view), ["↑↓", "o", "e", "k", "RK", "?"])
         view.handle("U")
         self.assertEqual((view.confirm, view.message), (None, "cannot start shop wt fix/cart: no start plan"))
         view.handle("up")
@@ -1356,7 +1444,7 @@ class DownPortTest(unittest.TestCase):
         self.assertEqual((view.confirm, view.message), (None, "20111 api is down: nothing runs to restart"))
         view.message = ""
         keys = [text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT]
-        self.assertEqual(keys, ["↑↓", "l", "RK", "?"])
+        self.assertEqual(keys, ["↑↓", "l", "e", "RK", "?"])
         self.assertIn("RK stack", "".join(text for text, _ in view.footer_segments(200)[0]))
         self.assertEqual(view.title_segments(200)[0][1:], portly.summary_segments(view.groups))
         view.handle("K")
@@ -2334,6 +2422,19 @@ class CommandTest(unittest.TestCase):
         self.assertIn(f"{free} is already free.", out)
         self.assertEqual(portly.listening_pids(port), [])
 
+    def test_edit_opens_a_server_s_folder_in_the_editor(self):
+        without_editors(self)
+        _, port = self.serve()
+        free = unused_port()
+        self.assertEqual(self.call("edit", str(port))[0], 2)  # no editor set
+        os.environ["PORTLY_EDITOR"], opened = recording_editor(self)
+        code, out, _ = self.call("edit", str(port), str(free))
+        self.assertEqual(code, 1)
+        self.assertIn(f"{free} is not listening.", out)
+        with open(opened) as written:
+            self.assertEqual(written.read(), os.path.realpath(self.folder))
+        self.assertEqual(self.call("edit", self.word)[0], 0)
+
     def test_up_finds_nothing_for_a_stack_that_does_not_run(self):
         code, out, _ = self.call("up", "wt98765")
         self.assertEqual((code, out.strip()), (1, "Nothing found for wt98765."))
@@ -2759,7 +2860,7 @@ class IdleWorktreeTest(unittest.TestCase):
         while view.selected != self.trees["feat/old"]:
             view.handle("down")
         self.assertEqual([text for text, tone in view.footer_segments(200)[0] if tone == portly.ACCENT],
-                         ["↑↓", "u", "U", "?"])
+                         ["↑↓", "e", "u", "U", "?"])
         self.assertEqual(view.detail_segments(view.current(), 100)[0][1], ("feat/old", portly.BOLD))
         view.handle("k")
         self.assertEqual(view.message, "shop wt feat/old is idle: nothing runs to stop; u starts it")
@@ -2825,6 +2926,19 @@ class IdleWorktreeTest(unittest.TestCase):
         self.assertEqual((code, asked, started), (0, ["  Start 1 stack? [y/N] "], ["wt3"]))
         self.assertIn(f"wt3  idle  wt up feat/old in {portly.tilde(self.main)}", out.getvalue())
         self.assertIn("wt3 is up.", out.getvalue())
+
+    def test_edit_opens_an_idle_worktree_a_word_names(self):
+        without_editors(self)
+        os.environ["PORTLY_EDITOR"], opened = recording_editor(self)
+        portly.remember_repos([self.busy])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(portly.main(["edit", "wt3"]), 0)
+        with open(opened) as written:
+            self.assertEqual(written.read(), self.trees["feat/old"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(portly.main(["edit", "shop"]), 0)
+        with open(opened) as written:  # a repo word opens its crashed stack's worktree, no idle one
+            self.assertEqual(written.read(), self.trees["feat/down"])
 
     def test_forget_drops_a_repo_until_something_runs_in_it(self):
         portly.remember_repos([self.busy])

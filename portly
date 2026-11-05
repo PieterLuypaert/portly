@@ -14,6 +14,7 @@
   portly forget shop   stop showing shop's idle worktrees, until something runs in it
   portly open 3000     open http://localhost:3000 in the browser (https for symfony)
   portly logs 3000     follow its output: docker logs, or the file it writes to
+  portly edit 3000     open its checkout in your editor ($PORTLY_EDITOR, else $VISUAL or $EDITOR)
   portly free 3000     the first free port from 3000 on
   portly wait 3000     wait until something listens on 3000
   portly --json        the same data as JSON, for scripts
@@ -39,6 +40,7 @@ import json
 import locale
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -2191,6 +2193,51 @@ def start_plan_lines(down: List[Listener], name_w: int, paint: Paint) -> List[st
     return lines
 
 
+def folder_of(item: Listener) -> str:
+    """The folder to open in an editor: a container's compose folder, the
+    top of a server's checkout, else the folder it runs from; "" when there
+    is none, such as for an app. It may be gone by now."""
+    if item.container:
+        return item.container.folder
+    if item.place:
+        return item.place.top
+    return "" if item.cwd in ("", "/") else item.cwd
+
+
+def can_edit(item: Listener) -> bool:
+    return os.path.isdir(folder_of(item)) if folder_of(item) else False
+
+
+# Where the editor command comes from, first set first.
+EDITOR_VARIABLES = ("PORTLY_EDITOR", "VISUAL", "EDITOR")
+
+
+def editor_command(folders: List[str]) -> Tuple[Optional[List[str]], str]:
+    """The editor command with folders as its last arguments, from the
+    first of EDITOR_VARIABLES that is set; else why there is none."""
+    name = next((name for name in EDITOR_VARIABLES if os.environ.get(name, "").strip()), "")
+    if not name:
+        return None, 'no editor set: set PORTLY_EDITOR, such as PORTLY_EDITOR="open -a Cursor"'
+    try:
+        return shlex.split(os.environ[name]) + folders, ""
+    except ValueError as error:
+        return None, f"cannot read {name}: {error}"
+
+
+def editor_name(command: List[str], folders: int) -> str:
+    """The editor command as you would type it, without its folders: open -a Cursor."""
+    return " ".join([os.path.basename(command[0])] + command[1:len(command) - folders])
+
+
+def run_editor(command: List[str]) -> str:
+    """Run the editor and wait for it; "" when it worked, else what went wrong."""
+    try:
+        done = subprocess.run(command, check=False)
+    except OSError as error:
+        return f"cannot run {command[0]}: {error.strerror}"
+    return f"{os.path.basename(command[0])} ended with code {done.returncode}" if done.returncode else ""
+
+
 def logs_command(item: Listener, lines: int, follow: bool) -> Optional[List[str]]:
     """The command that shows a port's output, or None when it writes to no file."""
     if item.container:
@@ -2556,14 +2603,15 @@ class LiveView:
     """portly live: the grouped list on top, the selected port below, keys at the bottom."""
 
     # The key row: only the keys that do something for the selected row.
-    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("r", "restart"), ("k", "stop"), ("u", "start"),
-            ("RKU", "stack"), ("?", "keys")]
+    KEYS = [("↑↓", "select"), ("o", "open"), ("l", "logs"), ("e", "edit"), ("r", "restart"), ("k", "stop"),
+            ("u", "start"), ("RKU", "stack"), ("?", "keys")]
     # What ? lists: every key.
     ALL_KEYS = [
         ("↑↓ pgup pgdn home end", "select a port; a click selects one, the wheel scrolls"),
         ("o enter", "open its url in the browser"),
         ("c", "copy its url"),
         ("l", "follow its output"),
+        ("e", "open its checkout in your editor: $PORTLY_EDITOR, else $VISUAL or $EDITOR"),
         ("r", "restart it the way it was started"),
         ("k", "stop it"),
         ("u", "start a stack's port that is down, the way wt started it, or an idle worktree's stack"),
@@ -2658,17 +2706,53 @@ class LiveView:
         if not command:
             self.say(f"does not write to a file: {output_of(item)}" if item else "", DIM)
             return
+
+        def follow() -> None:
+            print(f"\n\033[90m── {item.port} {label(item)} · ctrl-c takes you back ──\033[0m\n", flush=True)
+            subprocess.run(command, check=False)
+
+        self.outside(follow)
+
+    def edit_selected(self) -> None:
+        """Open the selected row's folder in the editor, as l follows logs:
+        a GUI editor returns at once, a terminal one when you quit it."""
+        item = self.current()
+        folder = folder_of(item) if item else ""
+        if not folder or not os.path.isdir(folder):
+            self.say(f"its folder is gone: {tilde(folder)}" if folder else "no folder to open for this row", DIM)
+            return
+        command, problem = editor_command([folder])
+        if not command:
+            self.say(problem, DIM)
+            return
+        name = editor_name(command, 1)
+
+        def edit() -> str:
+            # An editor that waits, such as code --wait from $VISUAL, leaves this line on the screen.
+            print(f"\n\033[90m── opening {tilde(folder)} with {name} · ctrl-c takes you back ──\033[0m\n", flush=True)
+            return run_editor(command)
+
+        problem = self.outside(edit)
+        if problem is None:
+            self.say(f"left {name} with ctrl-c", DIM)
+        else:
+            self.say(problem or f"opened {tilde(folder)} with {name}", GONE if problem else FREE)
+
+    def outside(self, action: Callable[[], object]) -> object:
+        """Put the view away, run action on the plain terminal and draw the
+        view again; what action gives, or None after a ctrl-c, which leaves
+        what action runs, not portly."""
         terminal_write(MOUSE_OFF)
         curses.def_prog_mode()
         curses.endwin()
-        print(f"\n\033[90m── {item.port} {label(item)} · ctrl-c takes you back ──\033[0m\n", flush=True)
         try:
-            subprocess.run(command, check=False)
+            return action()
         except KeyboardInterrupt:
-            pass  # ctrl-c is how you leave the logs
-        curses.reset_prog_mode()
-        terminal_write(MOUSE_ON)
-        self.screen.clear()
+            return None  # how you leave the logs, or an editor that waits
+        finally:
+            curses.reset_prog_mode()
+            terminal_write(MOUSE_ON)
+            self.screen.clear()
 
     def is_busy(self) -> bool:
         """Whether a stop, restart or start still runs, and if so, say so: one
@@ -2782,7 +2866,7 @@ class LiveView:
                 self.filter = ""
                 self.rebuild()
         moves = {"up": -1, "down": 1, "pgup": -10, "pgdn": 10, "home": -10 ** 6, "end": 10 ** 6}
-        actions = {"o": self.open_selected, "enter": self.open_selected, "l": self.follow_logs,
+        actions = {"o": self.open_selected, "enter": self.open_selected, "l": self.follow_logs, "e": self.edit_selected,
                    "c": self.copy_selected, "k": lambda: self.ask("stop", False), "K": lambda: self.ask("stop", True),
                    "r": lambda: self.ask("restart", False), "R": lambda: self.ask("restart", True),
                    "u": lambda: self.ask_start(False), "U": lambda: self.ask_start(True)}
@@ -2903,7 +2987,7 @@ class LiveView:
         if not item or not group:
             return {"?"}
         running = any(runs(row) for row in group.rows)
-        checks = {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log),
+        checks = {"↑↓": True, "o": bool(url_of(item)), "l": bool(item.container or item.log), "e": can_edit(item),
                   "r": bool(item.container or item.restart),
                   "k": runs(item) and not is_docker_itself(item), "u": bool(item.start),
                   "R": running, "K": running, "U": any(row.start for row in group.rows), "?": True}
@@ -3030,6 +3114,7 @@ HELP = """\
   portly forget shop       stop showing shop's idle worktrees, until something runs in it
   portly open 3000/admin   open http://localhost:3000/admin in your browser (https for symfony)
   portly logs 3000         follow its output: docker logs, or the file it writes to
+  portly edit 3000         open its checkout in your editor ($PORTLY_EDITOR, else $VISUAL or $EDITOR)
   portly free 3000         the first free port from 3000 on
   portly wait 3000         wait until something listens on 3000 (handy in scripts)
 """
@@ -3154,6 +3239,35 @@ def cmd_forget(argv: List[str]) -> int:
     return 1 if unknown else 0
 
 
+def cmd_edit(argv: List[str]) -> int:
+    parser = parser_for("edit", "Open the folder of what listens on a port, or of a project, in your editor "
+                                "($PORTLY_EDITOR, else $VISUAL or $EDITOR).")
+    parser.add_argument("targets", nargs="+", metavar="port|project")
+    args = parser.parse_args(argv)
+    ports, terms = targets_of(parser, args.targets)
+    targets, free = pick_targets(with_idle_worktrees(with_down_ports(one_per_port(read_listeners()))), ports, terms)
+    # An idle worktree opens when a word names it (wt3, or its branch), not with every word of its repo.
+    words = {term.lower() for term in terms}
+    targets = [item for item in targets if not item.is_idle or words & {stack_word(item), item.place.branch.lower()}]
+    paint = paint_for_stdout()
+    lines = [f"  {paint(BOLD, str(port))} is not listening." for port in free]
+    lines += [f"  {paint(BOLD, name_of(item))} {label(item)}: " + (f"its folder is gone ({tilde(folder_of(item))})"
+              if folder_of(item) else "no folder to open") for item in targets if not can_edit(item)]
+    if terms and not targets:
+        lines.append(f"  Nothing found for {' '.join(terms)}.")
+    folders = list(dict.fromkeys(folder_of(item) for item in targets if can_edit(item)))
+    if lines:
+        print("\n" + "\n".join(lines) + "\n")
+    if not folders:
+        return 1
+    command, problem = editor_command(folders)
+    problem = problem or run_editor(command)
+    if problem:
+        print(f"portly: {problem}", file=sys.stderr)
+        return 2 if not command else 1
+    return 1 if lines else 0
+
+
 def cmd_open(argv: List[str]) -> int:
     parser = parser_for("open", "Open a port in your browser.")
     parser.add_argument("targets", nargs="+", metavar="port[/path]")
@@ -3269,7 +3383,7 @@ def cmd_live(argv: List[str]) -> int:
 
 
 COMMANDS = {"list": cmd_show, "ls": cmd_show, "kill": cmd_kill, "restart": cmd_restart, "up": cmd_up,
-            "forget": cmd_forget, "open": cmd_open, "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
+            "forget": cmd_forget, "edit": cmd_edit, "open": cmd_open, "logs": cmd_logs, "free": cmd_free, "wait": cmd_wait, "live": cmd_live,
             # The Dutch names from its days as poort, so scripts and habits keep working.
             "lijst": cmd_show, "herstart": cmd_restart, "vrij": cmd_free, "wacht": cmd_wait}
 
